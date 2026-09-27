@@ -1,9 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import axios from 'axios';
 import '../styles/ProductList.css';
-
-const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:3001/api';
 
 export default function ProductList() {
   const [products, setProducts] = useState([]);
@@ -11,51 +8,45 @@ export default function ProductList() {
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    const fetchProducts = async () => {
-      try {
-        setLoading(true);
-        const response = await axios.get(`${API_BASE}/products`);
-        setProducts(response.data);
-        setError(null);
-      } catch (err) {
-        setError(err.message || '상품을 불러올 수 없습니다.');
-        setProducts([]);
-      } finally {
-        setLoading(false);
-      }
-    };
-
     fetchProducts();
   }, []);
 
-  if (loading) {
-    return <div className="product-list-container"><p>로딩 중...</p></div>;
-  }
+  const fetchProducts = async () => {
+    try {
+      setLoading(true);
+      const response = await fetch('/api/products');
+      if (!response.ok) throw new Error('상품 조회 실패');
+      const data = await response.json();
+      setProducts(data);
+      setError(null);
+    } catch (err) {
+      setError(err.message);
+      setProducts([]);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  if (error) {
-    return <div className="product-list-container"><p className="error">오류: {error}</p></div>;
-  }
+  if (loading) return <div className="container"><p>로딩 중...</p></div>;
+  if (error) return <div className="container"><p className="error">오류: {error}</p></div>;
 
   return (
-    <div className="product-list-container">
+    <div className="container">
       <h1>상품 목록</h1>
       {products.length === 0 ? (
         <p>상품이 없습니다.</p>
       ) : (
         <div className="product-grid">
           {products.map((product) => (
-            <Link
-              key={product.id}
-              to={`/product/${product.id}`}
-              className="product-card"
-            >
+            <Link key={product._id} to={`/product/${product._id}`} className="product-card">
               <div className="product-image">
-                <img src={product.image} alt={product.name} />
+                <img src={product.image || '/placeholder.png'} alt={product.name} />
               </div>
               <div className="product-info">
-                <h2>{product.name}</h2>
+                <h3>{product.name}</h3>
                 <p className="description">{product.description}</p>
-                <p className="price">${product.price.toFixed(2)}</p>
+                <p className="price">{product.price.toLocaleString()}원</p>
+                <p className="stock">재고: {product.stock}</p>
               </div>
             </Link>
           ))}

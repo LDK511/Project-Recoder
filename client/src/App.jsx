@@ -1,36 +1,39 @@
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
-import { CartProvider } from './context/CartContext';
-import ProductList from './pages/ProductList';
-import ProductDetail from './pages/ProductDetail';
-import Checkout from './pages/Checkout';
-import './App.css';
+import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom'
+import ProductList from './pages/ProductList'
+import ProductDetail from './pages/ProductDetail'
+import Cart from './pages/Cart'
+import Checkout from './pages/Checkout'
+import OrderConfirm from './pages/OrderConfirm'
+import './App.css'
 
 function App() {
   return (
-    <CartProvider>
-      <Router>
-        <div className="app">
-          <header className="header">
-            <h1>🛍️ ShopMall</h1>
+    <Router>
+      <div className="app">
+        <header className="header">
+          <div className="container">
+            <h1>🛍️ 쇼핑몰</h1>
             <nav>
-              <a href="/">상품</a>
-              <a href="/checkout">장바구니</a>
+              <Link to="/">상품</Link>
+              <Link to="/cart">장바구니</Link>
             </nav>
-          </header>
-          <main className="main-content">
-            <Routes>
-              <Route path="/" element={<ProductList />} />
-              <Route path="/product/:id" element={<ProductDetail />} />
-              <Route path="/checkout" element={<Checkout />} />
-            </Routes>
-          </main>
-          <footer className="footer">
-            <p>&copy; 2024 ShopMall. All rights reserved.</p>
-          </footer>
-        </div>
-      </Router>
-    </CartProvider>
-  );
+          </div>
+        </header>
+        <main className="main">
+          <Routes>
+            <Route path="/" element={<ProductList />} />
+            <Route path="/product/:id" element={<ProductDetail />} />
+            <Route path="/cart" element={<Cart />} />
+            <Route path="/checkout" element={<Checkout />} />
+            <Route path="/order-confirm/:orderId" element={<OrderConfirm />} />
+          </Routes>
+        </main>
+        <footer className="footer">
+          <p>&copy; 2024 쇼핑몰. All rights reserved.</p>
+        </footer>
+      </div>
+    </Router>
+  )
 }
 
-export default App;
+export default App
