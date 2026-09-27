@@ -1,22 +1,22 @@
 {
   "name": "shopping-mall",
   "version": "1.0.0",
-  "description": "Full-stack shopping mall with PostgreSQL",
+  "description": "Full-stack shopping mall with PostgreSQL and Stripe payment integration",
   "main": "server/index.js",
   "scripts": {
     "dev": "concurrently \"npm run server\" \"npm run client\"",
-    "server": "node server/index.js",
+    "server": "cd server && node index.js",
     "client": "cd client && npm start",
     "build": "cd client && npm run build"
   },
-  "dependencies": {
-    "express": "^4.18.2",
-    "pg": "^8.11.3",
-    "cors": "^2.8.5",
-    "dotenv": "^16.3.1",
-    "bcryptjs": "^2.4.3",
-    "jsonwebtoken": "^9.1.2"
-  },
+  "keywords": [
+    "shopping",
+    "ecommerce",
+    "stripe",
+    "postgresql"
+  ],
+  "author": "",
+  "license": "ISC",
   "devDependencies": {
     "concurrently": "^8.2.2"
   }

@@ -1,51 +1,66 @@
 import { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import axios from 'axios';
+import '../styles/ProductList.css';
 
-function ProductList({ addToCart }) {
+const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:3001/api';
+
+export default function ProductList() {
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
-  const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+  const [error, setError] = useState(null);
 
   useEffect(() => {
+    const fetchProducts = async () => {
+      try {
+        setLoading(true);
+        const response = await axios.get(`${API_BASE}/products`);
+        setProducts(response.data);
+        setError(null);
+      } catch (err) {
+        setError(err.message || '상품을 불러올 수 없습니다.');
+        setProducts([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+
     fetchProducts();
   }, []);
 
-  const fetchProducts = async () => {
-    try {
-      const response = await axios.get(`${API_URL}/api/products`);
-      setProducts(response.data);
-    } catch (error) {
-      console.error('Failed to fetch products:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+  if (loading) {
+    return <div className="product-list-container"><p>로딩 중...</p></div>;
+  }
 
-  if (loading) return <div className="container"><p>Loading products...</p></div>;
+  if (error) {
+    return <div className="product-list-container"><p className="error">오류: {error}</p></div>;
+  }
 
   return (
-    <div className="container">
-      <h2>Our Products</h2>
-      <div className="product-grid">
-        {products.map(product => (
-          <div key={product.id} className="product-card">
-            <img src={product.image_url} alt={product.name} className="product-image" />
-            <div className="product-info">
-              <div className="product-name">{product.name}</div>
-              <div className="product-price">${product.price}</div>
-              <div className="product-stock">Stock: {product.stock}</div>
-              <button
-                onClick={() => addToCart(product)}
-                disabled={product.stock === 0}
-              >
-                {product.stock > 0 ? 'Add to Cart' : 'Out of Stock'}
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
+    <div className="product-list-container">
+      <h1>상품 목록</h1>
+      {products.length === 0 ? (
+        <p>상품이 없습니다.</p>
+      ) : (
+        <div className="product-grid">
+          {products.map((product) => (
+            <Link
+              key={product.id}
+              to={`/product/${product.id}`}
+              className="product-card"
+            >
+              <div className="product-image">
+                <img src={product.image} alt={product.name} />
+              </div>
+              <div className="product-info">
+                <h2>{product.name}</h2>
+                <p className="description">{product.description}</p>
+                <p className="price">${product.price.toFixed(2)}</p>
+              </div>
+            </Link>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
-
-export default ProductList;
