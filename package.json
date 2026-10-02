@@ -1,30 +1,19 @@
 {
   "name": "shopping-mall",
   "version": "1.0.0",
-  "description": "Node.js + Express + MongoDB + 아임포트 쇼핑몰",
-  "main": "server.js",
-  "type": "module",
+  "description": "Full-stack shopping mall application with Node.js, Express, PostgreSQL, and React",
+  "private": true,
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js",
-    "build:client": "cd client && npm run build",
-    "install:all": "npm install && cd client && npm install"
+    "dev": "concurrently \"npm run dev --workspace=backend\" \"npm run dev --workspace=frontend\"",
+    "start": "npm start --workspace=backend",
+    "db:init": "npm run db:init --workspace=backend",
+    "build": "npm --prefix frontend run build && npm run build --workspace=frontend && npm run build --workspace=backend"
   },
-  "keywords": [
-    "shopping",
-    "mall",
-    "ecommerce"
+  "workspaces": [
+    "backend",
+    "frontend"
   ],
-  "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "express": "^4.18.0",
-    "mongoose": "^7.0.0",
-    "axios": "^1.4.0",
-    "iamport-rest-client-nodejs": "^1.0.0",
-    "dotenv": "^16.0.0",
-    "cors": "^2.8.5",
-    "bcryptjs": "^2.4.3",
-    "jsonwebtoken": "^9.0.0"
+  "devDependencies": {
+    "concurrently": "^8.2.2"
   }
 }
