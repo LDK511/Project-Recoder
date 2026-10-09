@@ -1,49 +1,105 @@
-import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom'
-import { AuthProvider } from './contexts/AuthContext.jsx'
-import { CartProvider } from './contexts/CartContext.jsx'
-import ProductList from './pages/ProductList.jsx'
-import ProductDetail from './pages/ProductDetail.jsx'
-import Cart from './pages/Cart.jsx'
-import Checkout from './pages/Checkout.jsx'
-import OrderHistory from './pages/OrderHistory.jsx'
-import Login from './pages/Login.jsx'
-import './App.css'
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { AuthProvider } from './context/AuthContext';
+import { CartProvider } from './context/CartContext';
+import Header from './components/Header';
+import Home from './pages/Home';
+import ProductDetail from './pages/ProductDetail';
+import Cart from './pages/Cart';
+import Checkout from './pages/Checkout';
+import OrderConfirmation from './pages/OrderConfirmation';
+import Orders from './pages/Orders';
+import OrderDetail from './pages/OrderDetail';
+import Register from './pages/Register';
+import Login from './pages/Login';
+import AdminProducts from './pages/AdminProducts';
+import AdminOrders from './pages/AdminOrders';
+import ProtectedRoute from './components/ProtectedRoute';
+import AdminRoute from './components/AdminRoute';
 
 function App() {
   return (
-    <AuthProvider>
-      <CartProvider>
-        <Router>
+    <Router>
+      <AuthProvider>
+        <CartProvider>
           <div className="app">
-            <header className="header">
-              <div className="header-container">
-                <Link to="/" className="logo">🛍️ ShopMall</Link>
-                <nav className="nav">
-                  <Link to="/">상품</Link>
-                  <Link to="/cart">장바구니</Link>
-                  <Link to="/orders">주문 이력</Link>
-                  <Link to="/login">계정</Link>
-                </nav>
-              </div>
-            </header>
+            <Header />
             <main className="main-content">
               <Routes>
-                <Route path="/" element={<ProductList />} />
-                <Route path="/product/:id" element={<ProductDetail />} />
-                <Route path="/cart" element={<Cart />} />
-                <Route path="/checkout" element={<Checkout />} />
-                <Route path="/orders" element={<OrderHistory />} />
+                {/* Public routes */}
+                <Route path="/" element={<Home />} />
+                <Route path="/products/:id" element={<ProductDetail />} />
+                <Route path="/register" element={<Register />} />
                 <Route path="/login" element={<Login />} />
+
+                {/* Protected routes */}
+                <Route
+                  path="/cart"
+                  element={
+                    <ProtectedRoute>
+                      <Cart />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/checkout"
+                  element={
+                    <ProtectedRoute>
+                      <Checkout />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/order-confirmation/:orderId"
+                  element={
+                    <ProtectedRoute>
+                      <OrderConfirmation />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/orders"
+                  element={
+                    <ProtectedRoute>
+                      <Orders />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/orders/:id"
+                  element={
+                    <ProtectedRoute>
+                      <OrderDetail />
+                    </ProtectedRoute>
+                  }
+                />
+
+                {/* Admin routes */}
+                <Route
+                  path="/admin/products"
+                  element={
+                    <AdminRoute>
+                      <AdminProducts />
+                    </AdminRoute>
+                  }
+                />
+                <Route
+                  path="/admin/orders"
+                  element={
+                    <AdminRoute>
+                      <AdminOrders />
+                    </AdminRoute>
+                  }
+                />
+
+                {/* Catch all */}
+                <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
             </main>
-            <footer className="footer">
-              <p>&copy; 2024 ShopMall. All rights reserved.</p>
-            </footer>
           </div>
-        </Router>
-      </CartProvider>
-    </AuthProvider>
-  )
+        </CartProvider>
+      </AuthProvider>
+    </Router>
+  );
 }
 
-export default App
+export default App;

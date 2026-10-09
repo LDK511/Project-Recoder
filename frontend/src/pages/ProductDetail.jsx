@@ -1,128 +1,128 @@
-import { useState, useEffect, useContext } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import { CartContext } from '../contexts/CartContext';
-import { AuthContext } from '../contexts/AuthContext';
+import { useState, useEffect } from 'react';
+import { useParams, useNavigate, Link } from 'react-router-dom';
+import { productsAPI } from '../api/client';
+import { useCart } from '../context/CartContext';
+import { useAuth } from '../context/AuthContext';
 import '../styles/ProductDetail.css';
 
-export default function ProductDetail() {
+function ProductDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { user } = useContext(AuthContext);
-  const { addToCart } = useContext(CartContext);
+  const { isAuthenticated } = useAuth();
+  const { addToCart } = useCart();
 
   const [product, setProduct] = useState(null);
+  const [quantity, setQuantity] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [quantity, setQuantity] = useState(1);
   const [addingToCart, setAddingToCart] = useState(false);
   const [addSuccess, setAddSuccess] = useState(false);
 
   useEffect(() => {
+    const fetchProduct = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const response = await productsAPI.getById(id);
+        setProduct(response.data);
+      } catch (err) {
+        setError(err.response?.data?.error || 'Failed to load product');
+        console.error('Fetch product error:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
     fetchProduct();
   }, [id]);
 
-  const fetchProduct = async () => {
-    try {
-      setLoading(true);
-      const response = await fetch(`/api/products/${id}`);
-      if (!response.ok) throw new Error('상품 조회 실패');
-      const data = await response.json();
-      setProduct(data);
-      setError(null);
-    } catch (err) {
-      setError(err.message);
-      setProduct(null);
-    } finally {
-      setLoading(false);
+  const handleQuantityChange = (e) => {
+    const value = parseInt(e.target.value) || 1;
+    if (value > 0 && value <= (product?.stock || 1)) {
+      setQuantity(value);
     }
   };
 
   const handleAddToCart = async () => {
-    if (!user) {
-      alert('로그인이 필요합니다.');
+    if (!isAuthenticated) {
       navigate('/login');
       return;
     }
 
-    if (quantity < 1 || quantity > product.stock) {
-      alert('유효한 수량을 입력하세요.');
-      return;
-    }
-
+    setAddingToCart(true);
+    setError(null);
     try {
-      setAddingToCart(true);
-      const response = await fetch('/api/cart', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${user.token}`,
-        },
-        body: JSON.stringify({
-          product_id: product.id,
-          quantity: parseInt(quantity),
-        }),
-      });
-
-      if (!response.ok) throw new Error('장바구니 추가 실패');
-      
-      addToCart({ ...product, quantity: parseInt(quantity) });
+      await addToCart(product.id, quantity);
       setAddSuccess(true);
-      setTimeout(() => setAddSuccess(false), 2000);
+      setTimeout(() => setAddSuccess(false), 3000);
       setQuantity(1);
     } catch (err) {
-      alert(`오류: ${err.message}`);
+      setError(err.message);
     } finally {
       setAddingToCart(false);
     }
   };
 
-  const handleQuantityChange = (e) => {
-    const value = parseInt(e.target.value);
-    if (value > 0 && value <= product.stock) {
-      setQuantity(value);
-    }
-  };
+  if (loading) {
+    return <div className="product-detail loading">Loading...</div>;
+  }
 
-  if (loading) return <p className="loading">상품을 불러오는 중...</p>;
-  if (error) return <p className="error">오류: {error}</p>;
-  if (!product) return <p className="error">상품을 찾을 수 없습니다.</p>;
+  if (error && !product) {
+    return <div className="product-detail error">Error: {error}</div>;
+  }
+
+  if (!product) {
+    return <div className="product-detail error">Product not found</div>;
+  }
+
+  const isOutOfStock = product.stock === 0;
 
   return (
-    <div className="product-detail-container">
-      <button className="back-button" onClick={() => navigate(-1)}>← 뒤로가기</button>
-      
-      <div className="product-detail">
+    <div className="product-detail">
+      <button className="back-button" onClick={() => navigate('/')}>
+        ← Back to Products
+      </button>
+
+      <div className="product-detail-container">
         <div className="product-image-section">
           <img
-            src={product.image_url || `https://placehold.co/500x400?text=${encodeURIComponent(product.name)}`}
+            src={product.image_url || 'https://placehold.co/400x400?text=No+Image'}
             alt={product.name}
             className="product-image"
           />
         </div>
 
         <div className="product-info-section">
-          <h1>{product.name}</h1>
-          
-          <div className="product-meta">
-            <span className={`stock-badge ${product.stock > 0 ? 'in-stock' : 'out-of-stock'}`}>
-              {product.stock > 0 ? `재고: ${product.stock}개` : '품절'}
-            </span>
+          <h1 className="product-name">{product.name}</h1>
+
+          <div className="product-price">${product.price.toFixed(2)}</div>
+
+          <div className="product-stock">
+            {isOutOfStock ? (
+              <span className="out-of-stock">Out of Stock</span>
+            ) : (
+              <span className="in-stock">In Stock ({product.stock} available)</span>
+            )}
           </div>
 
-          <p className="description">{product.description}</p>
-
-          <div className="price-section">
-            <span className="price">₩{parseInt(product.price).toLocaleString()}</span>
+          <div className="product-description">
+            <h3>Description</h3>
+            <p>{product.description || 'No description available'}</p>
           </div>
 
-          <div className="purchase-section">
+          {error && <div className="error-message">{error}</div>}
+          {addSuccess && (
+            <div className="success-message">Added to cart successfully!</div>
+          )}
+
+          <div className="product-actions">
             <div className="quantity-selector">
-              <label htmlFor="quantity">수량:</label>
+              <label htmlFor="quantity">Quantity:</label>
               <select
                 id="quantity"
                 value={quantity}
                 onChange={handleQuantityChange}
-                disabled={product.stock === 0}
+                disabled={isOutOfStock}
               >
                 {Array.from({ length: Math.min(product.stock, 10) }, (_, i) => (
                   <option key={i + 1} value={i + 1}>
@@ -135,22 +135,15 @@ export default function ProductDetail() {
             <button
               className="add-to-cart-button"
               onClick={handleAddToCart}
-              disabled={product.stock === 0 || addingToCart}
+              disabled={isOutOfStock || addingToCart}
             >
-              {addingToCart ? '추가 중...' : '장바구니 추가'}
+              {addingToCart ? 'Adding...' : 'Add to Cart'}
             </button>
           </div>
 
-          {addSuccess && (
-            <p className="success-message">✓ 장바구니에 추가되었습니다!</p>
-          )}
-
-          {!user && (
+          {!isAuthenticated && (
             <p className="login-prompt">
-              <button onClick={() => navigate('/login')} className="link-button">
-                로그인
-              </button>
-              하여 구매하세요.
+              Please <Link to="/login">log in</Link> to add items to your cart.
             </p>
           )}
         </div>
@@ -158,3 +151,5 @@ export default function ProductDetail() {
     </div>
   );
 }
+
+export default ProductDetail;

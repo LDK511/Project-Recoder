@@ -1,110 +1,135 @@
-import { useState, useContext } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { AuthContext } from '../contexts/AuthContext';
-import '../styles/Login.css';
+import { useState } from 'react';
+import { useNavigate, Link, useLocation } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
+import '../styles/Auth.css';
 
-export default function Login() {
-  const [isLogin, setIsLogin] = useState(true);
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [name, setName] = useState('');
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
-  const { login } = useContext(AuthContext);
+function Login() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const { login, error: authError } = useAuth();
+  const [formData, setFormData] = useState({
+    email: '',
+    password: ''
+  });
+  const [errors, setErrors] = useState({});
+  const [loading, setLoading] = useState(false);
+  const [success, setSuccess] = useState(false);
+
+  const validateForm = () => {
+    const newErrors = {};
+
+    if (!formData.email.trim()) {
+      newErrors.email = 'Email is required';
+    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
+      newErrors.email = 'Please enter a valid email';
+    }
+
+    if (!formData.password) {
+      newErrors.password = 'Password is required';
+    }
+
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
+
+  const handleChange = (e) => {
+    const { name, value } = e.target;
+    setFormData(prev => ({
+      ...prev,
+      [name]: value
+    }));
+    // Clear error for this field when user starts typing
+    if (errors[name]) {
+      setErrors(prev => ({
+        ...prev,
+        [name]: ''
+      }));
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setError('');
+
+    if (!validateForm()) {
+      return;
+    }
+
     setLoading(true);
-
     try {
-      const endpoint = isLogin ? '/api/auth/login' : '/api/auth/register';
-      const payload = isLogin
-        ? { email, password }
-        : { email, password, name };
+      const result = await login(formData.email, formData.password);
+      setSuccess(true);
 
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        setError(data.error || '요청 실패');
-        return;
-      }
-
-      login(data.token, data.user);
-      navigate('/');
+      // Redirect to intended page or home
+      setTimeout(() => {
+        const from = location.state?.from?.pathname || '/';
+        navigate(from);
+      }, 1000);
     } catch (err) {
-      setError('네트워크 오류: ' + err.message);
+      setErrors({ submit: err.message });
     } finally {
       setLoading(false);
     }
   };
 
+  if (success) {
+    return (
+      <div className="auth-container">
+        <div className="auth-card success">
+          <h2>Login Successful!</h2>
+          <p>Welcome back!</p>
+          <p className="redirect-message">Redirecting...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="login-container">
-      <div className="login-card">
-        <h1>{isLogin ? '로그인' : '회원가입'}</h1>
-        {error && <div className="error-message">{error}</div>}
-        <form onSubmit={handleSubmit}>
-          {!isLogin && (
-            <div className="form-group">
-              <label>이름</label>
-              <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                required
-                placeholder="이름을 입력하세요"
-              />
-            </div>
-          )}
+    <div className="auth-container">
+      <div className="auth-card">
+        <h1>Login</h1>
+        <form onSubmit={handleSubmit} className="auth-form">
           <div className="form-group">
-            <label>이메일</label>
+            <label htmlFor="email">Email</label>
             <input
               type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-              placeholder="이메일을 입력하세요"
+              id="email"
+              name="email"
+              value={formData.email}
+              onChange={handleChange}
+              placeholder="you@example.com"
+              disabled={loading}
             />
+            {errors.email && <span className="error-message">{errors.email}</span>}
           </div>
+
           <div className="form-group">
-            <label>비밀번호</label>
+            <label htmlFor="password">Password</label>
             <input
               type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              placeholder="비밀번호를 입력하세요"
+              id="password"
+              name="password"
+              value={formData.password}
+              onChange={handleChange}
+              placeholder="Enter your password"
+              disabled={loading}
             />
+            {errors.password && <span className="error-message">{errors.password}</span>}
           </div>
-          <button type="submit" disabled={loading} className="submit-btn">
-            {loading ? '처리 중...' : isLogin ? '로그인' : '회원가입'}
+
+          {errors.submit && <div className="error-box">{errors.submit}</div>}
+          {authError && <div className="error-box">{authError}</div>}
+
+          <button type="submit" className="submit-btn" disabled={loading}>
+            {loading ? 'Logging in...' : 'Login'}
           </button>
         </form>
-        <div className="toggle-auth">
-          {isLogin ? '계정이 없으신가요? ' : '이미 계정이 있으신가요? '}
-          <button
-            type="button"
-            onClick={() => {
-              setIsLogin(!isLogin);
-              setError('');
-              setEmail('');
-              setPassword('');
-              setName('');
-            }}
-            className="toggle-btn"
-          >
-            {isLogin ? '회원가입' : '로그인'}
-          </button>
+
+        <div className="auth-footer">
+          <p>Don't have an account? <Link to="/register">Register here</Link></p>
         </div>
       </div>
     </div>
   );
 }
+
+export default Login;

@@ -1,265 +1,211 @@
-import { useContext, useEffect, useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { CartContext } from '../contexts/CartContext';
-import { AuthContext } from '../contexts/AuthContext';
+import { loadStripe } from '@stripe/stripe-js';
+import { Elements, CardElement, useStripe, useElements } from '@stripe/react-stripe-js';
+import { useCart } from '../context/CartContext';
+import { useAuth } from '../context/AuthContext';
+import { ordersAPI } from '../api/client';
 import '../styles/Checkout.css';
 
-export default function Checkout() {
-  const navigate = useNavigate();
-  const { user } = useContext(AuthContext);
-  const { clearCart } = useContext(CartContext);
-  const [items, setItems] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [processing, setProcessing] = useState(false);
-  const [formData, setFormData] = useState({
-    name: user?.name || '',
-    email: user?.email || '',
-    phone: '',
-    address: '',
-    cardNumber: '',
-    cardExpiry: '',
-    cardCvc: ''
-  });
 
-  useEffect(() => {
-    if (!user) {
-      navigate('/login');
+function CheckoutForm() {
+  const stripe = useStripe();
+  const elements = useElements();
+  const navigate = useNavigate();
+  const { items, total, clearCart } = useCart();
+  const { user } = useAuth();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [clientSecret, setClientSecret] = useState(null);
+  const [orderId, setOrderId] = useState(null);
+  const idempotencyKeyRef = useRef(null);
+
+  const handleCreateOrder = async () => {
+    if (!idempotencyKeyRef.current) idempotencyKeyRef.current = crypto.randomUUID();
+    const response = await ordersAPI.create(idempotencyKeyRef.current);
+    setClientSecret(response.data.client_secret);
+    setOrderId(response.data.order_id);
+    return response.data;
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+
+    if (!stripe || !elements) {
+      setError('Payment system not ready');
       return;
     }
-    fetchCartItems();
-  }, [user, navigate]);
 
-  const fetchCartItems = async () => {
+    setLoading(true);
+    setError(null);
+
     try {
-      setLoading(true);
-      const response = await fetch('/api/cart', {
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
+      const order = clientSecret ? {client_secret: clientSecret, order_id: orderId} : await handleCreateOrder();
+      const result = await stripe.confirmCardPayment(order.client_secret, {
+        payment_method: {
+          card: elements.getElement(CardElement),
+          billing_details: {
+            name: user.name,
+            email: user.email
+          }
         }
       });
-      if (!response.ok) throw new Error('장바구니 조회 실패');
-      const data = await response.json();
-      setItems(data.items || []);
-      setError(null);
+
+      if (result.error) {
+        setError(result.error.message);
+      } else if (result.paymentIntent.status === 'succeeded') {
+        // Payment successful - wait for webhook confirmation
+        clearCart();
+        navigate(`/order-confirmation/${order.order_id}`);
+      } else if (result.paymentIntent.status === 'requires_action') {
+        setError('Payment requires additional authentication');
+      } else {
+        setError('Payment failed');
+      }
     } catch (err) {
-      setError(err.message);
+      setError(err.message || 'Payment processing error');
+      console.error('Payment error:', err);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleInputChange = (e) => {
-    const { name, value } = e.target;
-    setFormData(prev => ({
-      ...prev,
-      [name]: value
-    }));
-  };
+  if (items.length === 0) {
+    return (
+      <div className="checkout-empty">
+        <p>Your cart is empty</p>
+      </div>
+    );
+  }
 
-  const validateForm = () => {
-    if (!formData.name || !formData.phone || !formData.address) {
-      setError('배송 정보를 모두 입력해주세요.');
-      return false;
-    }
-    if (!formData.cardNumber || !formData.cardExpiry || !formData.cardCvc) {
-      setError('결제 정보를 모두 입력해주세요.');
-      return false;
-    }
-    if (items.length === 0) {
-      setError('장바구니가 비어있습니다.');
-      return false;
-    }
-    return true;
-  };
+  return (
+    <form onSubmit={handleSubmit} className="checkout-form">
+      <div className="checkout-section">
+        <h3>Order Summary</h3>
+        <div className="order-summary">
+          {items.map((item) => (
+            <div key={item.product_id} className="summary-item">
+              <span>Product {item.product_id}</span>
+              <span>x{item.quantity}</span>
+              <span>${(item.price * item.quantity).toFixed(2)}</span>
+            </div>
+          ))}
+          <div className="summary-total">
+            <strong>Total: ${total.toFixed(2)}</strong>
+          </div>
+        </div>
+      </div>
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!validateForm()) return;
+      <div className="checkout-section">
+        <h3>Payment Details</h3>
+        <div className="card-element-wrapper">
+          <CardElement
+            options={{
+              style: {
+                base: {
+                  fontSize: '16px',
+                  color: '#424770',
+                  '::placeholder': {
+                    color: '#aab7c4'
+                  }
+                },
+                invalid: {
+                  color: '#fa755a'
+                }
+              }
+            }}
+          />
+        </div>
+      </div>
 
+      {error && <div className="error-message">{error}</div>}
+
+      <button
+        type="submit"
+        disabled={loading || !stripe}
+        className="checkout-button"
+      >
+        {loading ? 'Processing...' : `Pay $${total.toFixed(2)}`}
+      </button>
+    </form>
+  );
+}
+
+function MockCheckout() {
+  const navigate = useNavigate();
+  const { fetchCart } = useCart();
+  const key = useRef(crypto.randomUUID());
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const create = async () => {
+    setBusy(true); setError('');
     try {
-      setProcessing(true);
-      setError(null);
-
-      const totalPrice = items.reduce((sum, item) => sum + (item.price * item.quantity), 0) + 3000;
-
-      const response = await fetch('/api/orders', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
-        },
-        body: JSON.stringify({
-          items: items.map(item => ({
-            product_id: item.product_id,
-            quantity: item.quantity,
-            price: item.price
-          })),
-          total_price: totalPrice,
-          shipping_info: {
-            name: formData.name,
-            phone: formData.phone,
-            address: formData.address
-          },
-          payment_info: {
-            cardNumber: formData.cardNumber.replace(/\s/g, '').slice(-4),
-            cardExpiry: formData.cardExpiry
-          }
-        })
-      });
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || '주문 생성 실패');
-      }
-
-      const orderData = await response.json();
-      clearCart();
-      navigate(`/orders/${orderData.order_id}`);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setProcessing(false);
-    }
+      const response = await ordersAPI.create(key.current);
+      await fetchCart();
+      navigate(`/orders/${response.data.order_id}`);
+    } catch (err) { setError(err.response?.data?.error || 'Order creation failed'); }
+    finally { setBusy(false); }
   };
+  return <section className="checkout-container">
+    <h1>Test checkout</h1>
+    <p>Mock payment provider. No card is charged. Payment stays pending until a signed test webhook is received.</p>
+    {error && <p role="alert">{error}</p>}
+    <button onClick={create} disabled={busy}>{busy ? 'Creating...' : 'Create test order'}</button>
+  </section>;
+}
 
-  if (loading) return <div className="checkout-container"><p>로딩 중...</p></div>;
+function Checkout() {
+  const { items } = useCart();
+  const navigate = useNavigate();
+  const [config, setConfig] = useState(null);
+  const [stripePromise, setStripePromise] = useState(null);
+  useEffect(() => {
+    let active = true;
+    fetch('/api/config').then(r => { if (!r.ok) throw Error('Config unavailable'); return r.json(); }).then(value => {
+      if (!active) return;
+      setConfig(value);
+      if (value.stripe_public_key) setStripePromise(loadStripe(value.stripe_public_key));
+    }).catch(() => { if (active) setConfig({}); });
+    return () => { active = false; };
+  }, []);
+  if (config === null) return <p role="status">Loading payment settings...</p>;
+  if (config.test_payment_mode && items.length > 0) return <MockCheckout />;
+  if (!config.stripe_public_key) {
+    return (
+      <div className="checkout-container">
+        <div className="checkout-empty">
+          <p>Payment service is not configured. Please contact support.</p>
+          <button onClick={() => navigate('/')} className="back-button">
+            Back to Home
+          </button>
+        </div>
+      </div>
+    );
+  }
 
-  const totalPrice = items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-  const shippingFee = 3000;
-  const finalTotal = totalPrice + shippingFee;
+  if (items.length === 0) {
+    return (
+      <div className="checkout-container">
+        <div className="checkout-empty">
+          <p>Your cart is empty</p>
+          <button onClick={() => navigate('/')} className="back-button">
+            Continue Shopping
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="checkout-container">
-      <h1>결제</h1>
-      {error && <div className="error-message">{error}</div>}
-
-      <div className="checkout-content">
-        <form onSubmit={handleSubmit} className="checkout-form">
-          <section className="form-section">
-            <h2>배송 정보</h2>
-            <div className="form-group">
-              <label htmlFor="name">이름</label>
-              <input
-                type="text"
-                id="name"
-                name="name"
-                value={formData.name}
-                onChange={handleInputChange}
-                required
-              />
-            </div>
-            <div className="form-group">
-              <label htmlFor="email">이메일</label>
-              <input
-                type="email"
-                id="email"
-                name="email"
-                value={formData.email}
-                disabled
-              />
-            </div>
-            <div className="form-group">
-              <label htmlFor="phone">휴대폰</label>
-              <input
-                type="tel"
-                id="phone"
-                name="phone"
-                value={formData.phone}
-                onChange={handleInputChange}
-                placeholder="010-0000-0000"
-                required
-              />
-            </div>
-            <div className="form-group">
-              <label htmlFor="address">배송 주소</label>
-              <input
-                type="text"
-                id="address"
-                name="address"
-                value={formData.address}
-                onChange={handleInputChange}
-                placeholder="도로명 주소"
-                required
-              />
-            </div>
-          </section>
-
-          <section className="form-section">
-            <h2>결제 정보</h2>
-            <div className="form-group">
-              <label htmlFor="cardNumber">카드 번호</label>
-              <input
-                type="text"
-                id="cardNumber"
-                name="cardNumber"
-                value={formData.cardNumber}
-                onChange={handleInputChange}
-                placeholder="0000 0000 0000 0000"
-                maxLength="19"
-                required
-              />
-            </div>
-            <div className="form-row">
-              <div className="form-group">
-                <label htmlFor="cardExpiry">유효기간</label>
-                <input
-                  type="text"
-                  id="cardExpiry"
-                  name="cardExpiry"
-                  value={formData.cardExpiry}
-                  onChange={handleInputChange}
-                  placeholder="MM/YY"
-                  maxLength="5"
-                  required
-                />
-              </div>
-              <div className="form-group">
-                <label htmlFor="cardCvc">CVC</label>
-                <input
-                  type="text"
-                  id="cardCvc"
-                  name="cardCvc"
-                  value={formData.cardCvc}
-                  onChange={handleInputChange}
-                  placeholder="000"
-                  maxLength="3"
-                  required
-                />
-              </div>
-            </div>
-          </section>
-
-          <button type="submit" className="submit-btn" disabled={processing}>
-            {processing ? '처리 중...' : '주문 완료'}
-          </button>
-        </form>
-
-        <aside className="order-summary">
-          <h2>주문 요약</h2>
-          <div className="summary-items">
-            {items.map(item => (
-              <div key={item.product_id} className="summary-item">
-                <span>{item.name} × {item.quantity}</span>
-                <span>₩{(item.price * item.quantity).toLocaleString()}</span>
-              </div>
-            ))}
-          </div>
-          <div className="summary-divider"></div>
-          <div className="summary-row">
-            <span>상품 금액:</span>
-            <span>₩{totalPrice.toLocaleString()}</span>
-          </div>
-          <div className="summary-row">
-            <span>배송료:</span>
-            <span>₩{shippingFee.toLocaleString()}</span>
-          </div>
-          <div className="summary-row total">
-            <span>총액:</span>
-            <span>₩{finalTotal.toLocaleString()}</span>
-          </div>
-        </aside>
+      <div className="checkout-wrapper">
+        <h1>Checkout</h1>
+        <Elements stripe={stripePromise}>
+          <CheckoutForm />
+        </Elements>
       </div>
     </div>
   );
 }
+
+export default Checkout;

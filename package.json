@@ -1,29 +1,17 @@
 {
   "name": "shopping-mall",
   "version": "1.0.0",
-  "description": "실제 운영 가능한 쇼핑몰 플랫폼",
-  "main": "server.js",
+  "description": "Full-stack shopping mall with Stripe payment integration",
+  "private": true,
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js",
-    "init-db": "node init-db.js",
-    "build-frontend": "cd frontend && npm run build",
-    "build": "npm run build-frontend"
+    "install": "npm --prefix backend install && npm --prefix frontend install",
+    "build": "npm --prefix frontend run build && npm --prefix backend install --omit=dev",
+    "start": "node backend/src/server.js",
+    "init-db": "node backend/init-db.js",
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev"
   },
-  "keywords": [
-    "shopping",
-    "mall",
-    "ecommerce"
-  ],
+  "keywords": [],
   "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "express": "^4.18.0",
-    "pg": "^8.11.0",
-    "jsonwebtoken": "^9.0.3",
-    "bcryptjs": "^2.4.3",
-    "dotenv": "^16.3.1",
-    "cors": "^2.8.5"
-  },
-  "devDependencies": {}
+  "license": "ISC"
 }
