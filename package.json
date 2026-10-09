@@ -1,19 +1,29 @@
 {
   "name": "shopping-mall",
   "version": "1.0.0",
-  "description": "Full-stack shopping mall application with Node.js, Express, PostgreSQL, and React",
-  "private": true,
+  "description": "실제 운영 가능한 쇼핑몰 플랫폼",
+  "main": "server.js",
   "scripts": {
-    "dev": "concurrently \"npm run dev --workspace=backend\" \"npm run dev --workspace=frontend\"",
-    "start": "npm start --workspace=backend",
-    "db:init": "npm run db:init --workspace=backend",
-    "build": "npm --prefix frontend run build && npm run build --workspace=frontend && npm run build --workspace=backend"
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "init-db": "node init-db.js",
+    "build-frontend": "cd frontend && npm run build",
+    "build": "npm run build-frontend"
   },
-  "workspaces": [
-    "backend",
-    "frontend"
+  "keywords": [
+    "shopping",
+    "mall",
+    "ecommerce"
   ],
-  "devDependencies": {
-    "concurrently": "^8.2.2"
-  }
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.18.0",
+    "pg": "^8.11.0",
+    "jsonwebtoken": "^9.0.3",
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.3.1",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {}
 }

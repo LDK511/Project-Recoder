@@ -1,123 +1,157 @@
-import { useEffect, useState } from 'react';
+import { useState, useEffect, useContext } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useCart } from '../context/CartContext';
+import { CartContext } from '../contexts/CartContext';
+import { AuthContext } from '../contexts/AuthContext';
 import '../styles/ProductDetail.css';
 
 export default function ProductDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { addToCart } = useCart();
+  const { user } = useContext(AuthContext);
+  const { addToCart } = useContext(CartContext);
+
   const [product, setProduct] = useState(null);
-  const [quantity, setQuantity] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [addedToCart, setAddedToCart] = useState(false);
+  const [quantity, setQuantity] = useState(1);
+  const [addingToCart, setAddingToCart] = useState(false);
+  const [addSuccess, setAddSuccess] = useState(false);
 
   useEffect(() => {
-    const fetchProduct = async () => {
-      try {
-        setLoading(true);
-        const res = await fetch(`/api/products/${id}`);
-        if (!res.ok) {
-          throw new Error('상품을 찾을 수 없습니다.');
-        }
-        const data = await res.json();
-        setProduct(data);
-      } catch (err) {
-        setError(err.message);
-      } finally {
-        setLoading(false);
-      }
-    };
-
     fetchProduct();
   }, [id]);
 
-  const handleAddToCart = () => {
-    if (product && quantity > 0) {
-      addToCart(product, quantity);
-      setAddedToCart(true);
-      setTimeout(() => setAddedToCart(false), 2000);
+  const fetchProduct = async () => {
+    try {
+      setLoading(true);
+      const response = await fetch(`/api/products/${id}`);
+      if (!response.ok) throw new Error('상품 조회 실패');
+      const data = await response.json();
+      setProduct(data);
+      setError(null);
+    } catch (err) {
+      setError(err.message);
+      setProduct(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAddToCart = async () => {
+    if (!user) {
+      alert('로그인이 필요합니다.');
+      navigate('/login');
+      return;
+    }
+
+    if (quantity < 1 || quantity > product.stock) {
+      alert('유효한 수량을 입력하세요.');
+      return;
+    }
+
+    try {
+      setAddingToCart(true);
+      const response = await fetch('/api/cart', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${user.token}`,
+        },
+        body: JSON.stringify({
+          product_id: product.id,
+          quantity: parseInt(quantity),
+        }),
+      });
+
+      if (!response.ok) throw new Error('장바구니 추가 실패');
+      
+      addToCart({ ...product, quantity: parseInt(quantity) });
+      setAddSuccess(true);
+      setTimeout(() => setAddSuccess(false), 2000);
+      setQuantity(1);
+    } catch (err) {
+      alert(`오류: ${err.message}`);
+    } finally {
+      setAddingToCart(false);
     }
   };
 
   const handleQuantityChange = (e) => {
-    const value = parseInt(e.target.value, 10);
-    if (value > 0 && value <= (product?.stock || 1)) {
+    const value = parseInt(e.target.value);
+    if (value > 0 && value <= product.stock) {
       setQuantity(value);
     }
   };
 
-  if (loading) {
-    return <div className="product-detail-container"><p>로딩 중...</p></div>;
-  }
-
-  if (error) {
-    return (
-      <div className="product-detail-container">
-        <p className="error">{error}</p>
-        <button onClick={() => navigate('/')}>상품 목록으로 돌아가기</button>
-      </div>
-    );
-  }
-
-  if (!product) {
-    return <div className="product-detail-container"><p>상품 정보를 불러올 수 없습니다.</p></div>;
-  }
+  if (loading) return <p className="loading">상품을 불러오는 중...</p>;
+  if (error) return <p className="error">오류: {error}</p>;
+  if (!product) return <p className="error">상품을 찾을 수 없습니다.</p>;
 
   return (
     <div className="product-detail-container">
-      <button className="back-btn" onClick={() => navigate('/')}>← 돌아가기</button>
-
-      <div className="product-detail-content">
+      <button className="back-button" onClick={() => navigate(-1)}>← 뒤로가기</button>
+      
+      <div className="product-detail">
         <div className="product-image-section">
           <img
-            src={product.image || 'https://via.placeholder.com/400'}
+            src={product.image_url || `https://placehold.co/500x400?text=${encodeURIComponent(product.name)}`}
             alt={product.name}
             className="product-image"
           />
         </div>
 
         <div className="product-info-section">
-          <h1 className="product-name">{product.name}</h1>
-          <p className="product-description">{product.description}</p>
-
-          <div className="product-price-section">
-            <span className="product-price">{product.price.toLocaleString()}원</span>
-            <span className={`stock-status ${product.stock > 0 ? 'in-stock' : 'out-of-stock'}`}>
+          <h1>{product.name}</h1>
+          
+          <div className="product-meta">
+            <span className={`stock-badge ${product.stock > 0 ? 'in-stock' : 'out-of-stock'}`}>
               {product.stock > 0 ? `재고: ${product.stock}개` : '품절'}
             </span>
           </div>
 
-          {product.stock > 0 && (
-            <div className="purchase-section">
-              <div className="quantity-selector">
-                <label htmlFor="quantity">수량:</label>
-                <select
-                  id="quantity"
-                  value={quantity}
-                  onChange={handleQuantityChange}
-                  className="quantity-input"
-                >
-                  {Array.from({ length: product.stock }, (_, i) => i + 1).map(num => (
-                    <option key={num} value={num}>
-                      {num}
-                    </option>
-                  ))}
-                </select>
-              </div>
+          <p className="description">{product.description}</p>
 
-              <button
-                className="add-to-cart-btn"
-                onClick={handleAddToCart}
+          <div className="price-section">
+            <span className="price">₩{parseInt(product.price).toLocaleString()}</span>
+          </div>
+
+          <div className="purchase-section">
+            <div className="quantity-selector">
+              <label htmlFor="quantity">수량:</label>
+              <select
+                id="quantity"
+                value={quantity}
+                onChange={handleQuantityChange}
+                disabled={product.stock === 0}
               >
-                장바구니에 추가
-              </button>
-
-              {addedToCart && (
-                <p className="success-message">장바구니에 추가되었습니다!</p>
-              )}
+                {Array.from({ length: Math.min(product.stock, 10) }, (_, i) => (
+                  <option key={i + 1} value={i + 1}>
+                    {i + 1}
+                  </option>
+                ))}
+              </select>
             </div>
+
+            <button
+              className="add-to-cart-button"
+              onClick={handleAddToCart}
+              disabled={product.stock === 0 || addingToCart}
+            >
+              {addingToCart ? '추가 중...' : '장바구니 추가'}
+            </button>
+          </div>
+
+          {addSuccess && (
+            <p className="success-message">✓ 장바구니에 추가되었습니다!</p>
+          )}
+
+          {!user && (
+            <p className="login-prompt">
+              <button onClick={() => navigate('/login')} className="link-button">
+                로그인
+              </button>
+              하여 구매하세요.
+            </p>
           )}
         </div>
       </div>
