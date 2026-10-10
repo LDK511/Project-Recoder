@@ -1,17 +1,20 @@
 {
   "name": "shopping-mall",
   "version": "1.0.0",
-  "description": "Full-stack shopping mall with Stripe payment integration",
+  "description": "Full-stack e-commerce platform with mock payment",
   "private": true,
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
   "scripts": {
-    "install": "npm --prefix backend install && npm --prefix frontend install",
-    "build": "npm --prefix frontend run build && npm --prefix backend install --omit=dev",
-    "start": "node backend/src/server.js",
-    "init-db": "node backend/init-db.js",
-    "dev:backend": "npm --prefix backend run dev",
-    "dev:frontend": "npm --prefix frontend run dev"
+    "dev": "npm run dev --workspaces",
+    "start": "npm start --workspace=backend",
+    "db:init": "npm run db:init --workspace=backend",
+    "db:reset": "npm run db:reset --workspace=backend",
+    "build": "npm --prefix frontend run build && npm run build --workspaces"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC"
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }

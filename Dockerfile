@@ -1,52 +1,76 @@
-# Stage 1: Build frontend
-FROM node:22-alpine AS frontend-builder
+# Build stage for backend
+FROM node:18-alpine AS backend-builder
+WORKDIR /app
 
+# Copy root and backend files
+COPY package.json package-lock.json* ./
+COPY backend ./backend
+
+# Install dependencies
+RUN npm install --omit=dev
+
+# Build backend TypeScript
+# ReCoder: build 스크립트가 frontend/ 에서 빌드하므로 그 의존성도 설치한다.
 WORKDIR /app/frontend
+RUN if [ -f package-lock.json ]; then npm ci || npm install; else npm install; fi
+WORKDIR /app
+RUN npm run build --workspace=backend
+# ReCoder: 빌드에만 쓰는 하위 폴더 의존성은 실행 이미지에 넣지 않는다(크기·보안 검사).
+RUN rm -rf frontend/node_modules
 
-COPY frontend/package*.json ./
-RUN npm ci
+# Build stage for frontend
+FROM node:18-alpine AS frontend-builder
+WORKDIR /app
 
-COPY frontend/ ./
-RUN npm run build
+# Copy root and frontend files
+COPY package.json package-lock.json* ./
+COPY frontend ./frontend
 
-# Stage 2: Build backend runtime
-FROM node:22-alpine AS backend-builder
+# Install dependencies
+RUN npm install --omit=dev
 
-WORKDIR /app/backend
+# Build frontend
+RUN npm run build --workspace=frontend
 
-COPY backend/package*.json ./
-RUN npm ci --omit=dev
+# Runtime stage
+FROM node:18-alpine
 
-# Stage 3: Runtime
-FROM node:22-alpine
+# hadolint ignore=DL3018
+# Install dumb-init for proper signal handling
+# ReCoder: OS 패키지는 기본 이미지 태그가 버전을 정합니다(저장소가 옛 버전을 지우면 고정한 버전 때문에 빌드가 깨짐)
+# hadolint ignore=DL3018
+RUN apk add --no-cache dumb-init
 
 WORKDIR /app
 
-# Remove npm, corepack, yarn from runtime image to reduce tool transitivity vulnerabilities
-RUN apk upgrade --no-cache zlib \
-    && rm -rf /usr/local/lib/node_modules /opt/yarn* /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg
-
 # Create non-root user
-# The official Node image already provides UID/GID 1000: node.
+RUN addgroup -g 1001 -S app && adduser -S -u 1001 -G app app
 
-# Copy backend dependencies from builder
-COPY --from=backend-builder --chown=node:node /app/backend/node_modules ./backend/node_modules
+# Copy package files
+COPY package.json package-lock.json* ./
 
-# Copy backend source
-COPY --chown=node:node backend/src ./backend/src
-COPY --chown=node:node backend/init-db.js ./backend/init-db.js
-COPY --chown=node:node backend/package.json ./backend/package.json
-COPY --chown=node:node certs ./certs
+# Install production dependencies only
+RUN npm install --no-audit --no-fund --omit=dev
 
-# Copy frontend dist
-COPY --from=frontend-builder --chown=node:node /app/frontend/dist ./frontend/dist
+# Copy built backend from builder
+COPY --from=backend-builder /app/backend/dist ./backend/dist
+COPY --from=backend-builder /app/backend/src/payments ./backend/src/payments
 
-USER 1000:1000
+# Copy built frontend from builder
+COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
-EXPOSE 3001
+# Change ownership
+RUN chown -R app:app /app
 
-# Health check: verify database connectivity with 5s timeout
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD ["node", "-e", "const http = require('http'); http.get('http://127.0.0.1:3001/health', (r) => { if (r.statusCode === 200) process.exit(0); else process.exit(1); }).on('error', () => process.exit(1)).setTimeout(5000, () => process.exit(1));"]
+# Switch to non-root user
+USER 1001
 
-CMD ["node", "backend/src/server.js"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD ["/bin/sh", "-c", "node -e \"require('http').get('http://localhost:' + (process.env.PORT || 3000) + '/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})\""]
+
+# Use dumb-init to handle signals properly
+ENTRYPOINT ["dumb-init", "--"]
+
+# Start the backend server
+CMD ["npm", "start", "--workspace=backend"]
