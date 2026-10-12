@@ -1,246 +1,341 @@
-import { useEffect, useState } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
-import { apiClient } from '../api/client';
-import { OrderDetail, HealthResponse } from '../types';
-import '../styles/OrderDetailPage.css';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
+import { getErrorMessage, ordersAPI } from '../api/client';
+import { useCartContext } from '../context/CartContext';
+import { useStoreConfig } from '../context/ConfigContext';
+import { useToast } from '../context/ToastContext';
+import type { Order } from '../types';
+import { formatDate, formatOrderStatus, formatPrice, trackingUrl } from '../utils/formatters';
+import OrderStatusBadge from '../components/OrderStatusBadge';
+import OrderProgress from '../components/OrderProgress';
+import LoadingSpinner from '../components/LoadingSpinner';
+import ErrorAlert from '../components/ErrorAlert';
+import StripePayment from '../components/StripePayment';
+import { EmptyState, Modal, ProductImage } from '../components/ui';
+import { Icon } from '../components/Icon';
 
-interface PaymentCheckState {
-  isChecking: boolean;
-  checkCount: number;
-  maxChecks: number;
-}
+const CLOSED_TITLE: Record<string, string> = {
+  cancelled: '취소된 주문입니다',
+  expired: '결제 기한이 지나 자동 취소된 주문입니다',
+  refunded: '환불이 완료된 주문입니다',
+};
 
-export default function OrderDetailPage() {
+const POLL_MS = 2000;
+const MAX_POLLS = 30;
+const CANCEL_REASONS = ['단순 변심', '다른 상품으로 다시 주문', '배송지를 잘못 입력함', '결제 수단 변경', '기타'];
+
+const OrderDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
-  const [order, setOrder] = useState<OrderDetail | null>(null);
+  const [params, setParams] = useSearchParams();
+  const fromPayment = params.get('from') === 'payment' || params.has('payment_intent');
+  const cfg = useStoreConfig();
+  const toast = useToast();
+  const cart = useCartContext();
+
+  const [order, setOrder] = useState<Order | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [polls, setPolls] = useState(0);
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const [reason, setReason] = useState(CANCEL_REASONS[0]);
   const [cancelling, setCancelling] = useState(false);
-  const [testPaymentMode, setTestPaymentMode] = useState(false);
-  const [paymentCheck, setPaymentCheck] = useState<PaymentCheckState>({
-    isChecking: false,
-    checkCount: 0,
-    maxChecks: 30,
-  });
+  const [paying, setPaying] = useState(false);
+  const [clientSecret, setClientSecret] = useState<string | null>(null);
 
-  const orderId = parseInt(id || '0', 10);
+  const load = useCallback(async () => {
+    const r = await ordersAPI.getDetail(Number(id));
+    setOrder(r.data);
+    return r.data as Order;
+  }, [id]);
 
-  // 주문 정보 조회
   useEffect(() => {
-    const fetchOrder = async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const response = await apiClient.get(`/api/orders/${orderId}`);
-        setOrder(response.data);
-      } catch (err: any) {
-        setError(err.response?.data?.error || '주문을 불러올 수 없습니다');
-      } finally {
-        setLoading(false);
-      }
-    };
+    load()
+      .catch((e) => setError(getErrorMessage(e, '주문을 불러오지 못했습니다.')))
+      .finally(() => setLoading(false));
+  }, [load]);
 
-    if (orderId > 0) {
-      fetchOrder();
-    }
-  }, [orderId]);
-
-  // 테스트 결제 모드 확인
+  // 결제창에서 돌아온 직후: 웹훅으로 결제가 확정될 때까지 잠시 확인
   useEffect(() => {
-    const checkPaymentMode = async () => {
-      try {
-        const response = await apiClient.get<HealthResponse>('/health');
-        setTestPaymentMode(response.data.test_payment_mode);
-      } catch (err) {
-        console.error('Failed to check payment mode', err);
-      }
-    };
+    if (!order || order.status !== 'pending' || !fromPayment || polls >= MAX_POLLS) return;
+    const t = window.setTimeout(() => {
+      load()
+        .then((o) => {
+          if (o.status === 'paid') {
+            cart.refresh().catch(() => undefined);
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => setPolls((p) => p + 1));
+    }, POLL_MS);
+    return () => window.clearTimeout(t);
+  }, [order, fromPayment, polls, load, cart]);
 
-    checkPaymentMode();
-  }, []);
-
-  // 결제 상태 확인 (테스트 모드에서 pending 상태일 때)
-  useEffect(() => {
-    if (
-      !testPaymentMode ||
-      !order ||
-      order.status !== 'pending' ||
-      paymentCheck.isChecking ||
-      paymentCheck.checkCount >= paymentCheck.maxChecks
-    ) {
-      return;
-    }
-
-    const timer = setTimeout(async () => {
-      try {
-        setPaymentCheck((prev) => ({ ...prev, isChecking: true }));
-        const response = await apiClient.get(`/api/orders/${orderId}`);
-        setOrder(response.data);
-        setPaymentCheck((prev) => ({
-          ...prev,
-          checkCount: prev.checkCount + 1,
-          isChecking: false,
-        }));
-      } catch (err) {
-        console.error('Failed to check order status', err);
-        setPaymentCheck((prev) => ({
-          ...prev,
-          checkCount: prev.checkCount + 1,
-          isChecking: false,
-        }));
-      }
-    }, 2000);
-
-    return () => clearTimeout(timer);
-  }, [testPaymentMode, order, orderId, paymentCheck]);
-
-  // 주문 취소
-  const handleCancel = async () => {
-    if (!window.confirm('이 주문을 취소하시겠습니까?')) {
-      return;
-    }
-
+  const resumePayment = async () => {
+    if (!order) return;
+    setPaying(true);
+    setError(null);
     try {
-      setCancelling(true);
-      setError(null);
-      const response = await apiClient.post(`/api/orders/${orderId}/cancel`);
-      setOrder(response.data);
-    } catch (err: any) {
-      setError(err.response?.data?.error || '주문 취소에 실패했습니다');
+      const r = await ordersAPI.resumePayment(order.id);
+      if (r.data.payment_url) {
+        window.location.assign(r.data.payment_url);
+        return;
+      }
+      if (r.data.client_secret && cfg.stripe_publishable_key) {
+        setClientSecret(r.data.client_secret);
+      } else {
+        setError('결제 수단이 설정되지 않았습니다. 고객센터로 문의해 주세요.');
+      }
+    } catch (e) {
+      setError(getErrorMessage(e));
+    } finally {
+      setPaying(false);
+    }
+  };
+
+  const cancel = async () => {
+    if (!order) return;
+    setCancelling(true);
+    try {
+      const r = await ordersAPI.cancel(order.id, reason);
+      setOrder(r.data);
+      setCancelOpen(false);
+      toast.show(order.status === 'paid' ? '주문을 취소했어요. 결제 금액은 결제 수단으로 환불됩니다.' : '주문을 취소했어요.');
+    } catch (e) {
+      toast.show(getErrorMessage(e), { tone: 'error' });
     } finally {
       setCancelling(false);
     }
   };
 
-  // 결제 진행
-  const handleProceedToPayment = () => {
-    navigate(`/checkout?order_id=${orderId}`);
-  };
-
-  if (loading) {
-    return (
-      <div className="order-detail-page">
-        <div className="loading">로딩 중...</div>
-      </div>
-    );
-  }
-
+  if (loading) return <LoadingSpinner />;
   if (!order) {
     return (
-      <div className="order-detail-page">
-        <div className="error-container">
-          <p className="error-message">{error || '주문을 찾을 수 없습니다'}</p>
-          <Link to="/orders" className="btn btn-primary">
-            주문 목록으로 돌아가기
-          </Link>
-        </div>
+      <div className="shell pt-8">
+        <EmptyState
+          title="주문을 찾을 수 없어요"
+          description={error ?? undefined}
+          action={
+            <Link to="/orders" className="btn-primary">
+              주문 내역으로
+            </Link>
+          }
+        />
       </div>
     );
   }
 
-  const statusLabel: Record<string, string> = {
-    pending: '결제 대기 중',
-    paid: '결제 완료',
-    completed: '배송 완료',
-    cancelled: '취소됨',
-  };
-
-  const statusClass = `status-${order.status}`;
+  const waiting = order.status === 'pending' && fromPayment && polls < MAX_POLLS;
+  const justPaid = fromPayment && ['paid', 'preparing'].includes(order.status);
+  const canCancel = order.status === 'pending' || order.status === 'paid';
+  const closed = ['cancelled', 'expired', 'refunded'].includes(order.status);
+  const track = trackingUrl(order.tracking_carrier, order.tracking_number);
+  const returnUrl = `${window.location.origin}/orders/${order.id}?from=payment`;
 
   return (
-    <div className="order-detail-page">
-      <div className="order-detail-container">
-        <div className="order-header">
-          <h1>주문 상세</h1>
-          <Link to="/orders" className="btn btn-secondary">
-            주문 목록
-          </Link>
+    <div className="shell max-w-3xl pt-8">
+      <Link to="/orders" className="inline-flex items-center gap-1 text-sm text-ink-mute hover:text-ink">
+        <Icon name="chevronLeft" className="h-4 w-4" /> 주문 내역
+      </Link>
+
+      {/* 상태 안내 */}
+      {justPaid && (
+        <div className="mt-4 rounded-xl bg-felt px-6 py-7 text-white">
+          <p className="text-2xl font-extrabold tracking-tight">주문이 완료되었어요</p>
+          <p className="mt-1.5 text-white/80">
+            결제가 확인되었습니다. 상품이 출고되면 송장번호를 이 화면에서 확인할 수 있어요.
+          </p>
+          <div className="mt-5 flex gap-2">
+            <Link to="/" className="btn bg-white text-felt hover:bg-white/90">
+              쇼핑 계속하기
+            </Link>
+            <button className="btn border border-white/40 text-white hover:bg-white/10" onClick={() => setParams({})}>
+              주문 상세 보기
+            </button>
+          </div>
         </div>
+      )}
+      {waiting && (
+        <div className="mt-4 flex items-center gap-3 rounded-xl border border-line px-5 py-4" role="status">
+          <LoadingSpinner inline size="small" />
+          <p>결제 결과를 확인하고 있어요. 이 화면을 닫지 말고 잠시만 기다려 주세요.</p>
+        </div>
+      )}
 
-        {error && <div className="alert alert-error">{error}</div>}
+      <div className="mt-6 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="page-title num">주문번호 {order.order_number}</h1>
+          <p className="mt-1 text-sm text-ink-mute">{formatDate(order.created_at)} 주문</p>
+        </div>
+        <OrderStatusBadge status={order.status} />
+      </div>
 
-        <div className="order-info-card">
-          <div className="info-row">
-            <label>주문 번호:</label>
-            <span className="value">#{order.id}</span>
-          </div>
-          <div className="info-row">
-            <label>주문 날짜:</label>
-            <span className="value">{new Date(order.created_at).toLocaleString('ko-KR')}</span>
-          </div>
-          <div className="info-row">
-            <label>상태:</label>
-            <span className={`value status ${statusClass}`}>{statusLabel[order.status]}</span>
-          </div>
-          {testPaymentMode && order.status === 'pending' && (
-            <div className="info-row test-payment-notice">
-              <span className="notice-text">
-                🧪 테스트 결제 모드: 결제 상태를 확인 중입니다... ({paymentCheck.checkCount}/{paymentCheck.maxChecks})
-              </span>
+      {error && <ErrorAlert message={error} onDismiss={() => setError(null)} className="mt-4" />}
+
+      {order.status === 'pending' && !waiting && (
+        <section className="panel mt-6 p-5">
+          <p className="font-semibold">결제를 기다리고 있어요</p>
+          <p className="mt-1 text-[15px] text-ink-soft">
+            {order.expires_at ? `${formatDate(order.expires_at)}까지 결제하지 않으면 주문이 자동 취소됩니다.` : '결제를 완료해 주세요.'}
+          </p>
+          {clientSecret && cfg.stripe_publishable_key ? (
+            <div className="mt-5">
+              <StripePayment publishableKey={cfg.stripe_publishable_key} clientSecret={clientSecret} amount={order.total_cents} returnUrl={returnUrl} />
+            </div>
+          ) : (
+            <button className="btn-primary mt-4" onClick={resumePayment} disabled={paying}>
+              {paying ? '결제창 여는 중…' : `${formatPrice(order.total_cents)} 결제하기`}
+            </button>
+          )}
+        </section>
+      )}
+
+      {closed && (
+        <section className="mt-6 rounded-lg bg-well p-5">
+          <p className="font-semibold">{CLOSED_TITLE[order.status]}</p>
+          <p className="mt-1 text-[15px] text-ink-soft">
+            {order.cancel_reason ? `사유: ${order.cancel_reason}` : ''}
+            {order.cancelled_at ? ` · ${formatDate(order.cancelled_at)}` : ''}
+          </p>
+          {order.payment_id && order.status !== 'expired' && (
+            <p className="mt-1 text-sm text-ink-mute">결제 금액은 결제 수단으로 환불되며, 카드사에 따라 3~5 영업일이 걸릴 수 있어요.</p>
+          )}
+        </section>
+      )}
+
+      {!closed && order.status !== 'pending' && (
+        <section className="panel mt-6 p-5 sm:p-6" aria-label="배송 진행 상태">
+          <OrderProgress order={order} />
+          {order.tracking_number && (
+            <div className="mt-6 flex flex-wrap items-center justify-between gap-3 rounded-md bg-well px-4 py-3">
+              <p className="text-[15px]">
+                <Icon name="truck" className="mr-1.5 inline h-5 w-5 align-[-4px] text-felt" />
+                {order.tracking_carrier} <span className="num font-semibold">{order.tracking_number}</span>
+              </p>
+              {track && (
+                <a href={track} target="_blank" rel="noreferrer" className="btn-outline btn-sm">
+                  배송 조회
+                </a>
+              )}
             </div>
           )}
-        </div>
+        </section>
+      )}
 
-        <div className="order-items-section">
-          <h2>주문 상품</h2>
-          <div className="items-table">
-            <div className="table-header">
-              <div className="col-product">상품</div>
-              <div className="col-quantity">수량</div>
-              <div className="col-price">단가</div>
-              <div className="col-total">합계</div>
+      <section className="panel mt-6 p-5 sm:p-6">
+        <h2 className="text-lg font-bold">주문 상품</h2>
+        <ul className="mt-3 divide-y divide-line">
+          {order.items.map((item, i) => (
+            <li key={item.id ?? i} className="flex items-center gap-4 py-3.5">
+              <ProductImage src={item.image_url} alt={item.product_name} className="h-16 w-16 shrink-0" />
+              <div className="min-w-0 flex-1">
+                {item.product_id ? (
+                  <Link to={`/products/${item.product_id}`} className="line-clamp-1 hover:underline">
+                    {item.product_name}
+                  </Link>
+                ) : (
+                  <p className="line-clamp-1">{item.product_name}</p>
+                )}
+                <p className="num text-sm text-ink-mute">
+                  {formatPrice(item.price_cents)} · {item.quantity}개
+                </p>
+              </div>
+              <p className="num font-bold">{formatPrice(item.price_cents * item.quantity)}</p>
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <div className="mt-6 grid gap-6 sm:grid-cols-2">
+        <section className="panel p-5 sm:p-6">
+          <h2 className="text-lg font-bold">배송지</h2>
+          <dl className="mt-3 space-y-1.5 text-[15px]">
+            <dd className="font-semibold">{order.recipient_name}</dd>
+            <dd className="num text-ink-soft">{order.recipient_phone}</dd>
+            <dd className="text-ink-soft">
+              ({order.postal_code}) {order.address1} {order.address2}
+            </dd>
+            {order.delivery_memo && <dd className="text-sm text-ink-mute">메모: {order.delivery_memo}</dd>}
+          </dl>
+        </section>
+        <section className="panel p-5 sm:p-6">
+          <h2 className="text-lg font-bold">결제 정보</h2>
+          <dl className="num mt-3 space-y-2 text-[15px]">
+            <div className="flex justify-between">
+              <dt className="text-ink-soft">상품 금액</dt>
+              <dd>{formatPrice(order.subtotal_cents)}</dd>
             </div>
-            {order.items && order.items.length > 0 ? (
-              order.items.map((item) => (
-                <div key={item.id} className="table-row">
-                  <div className="col-product">상품 ID: {item.product_id}</div>
-                  <div className="col-quantity">{item.quantity}</div>
-                  <div className="col-price">₩{item.unit_price.toLocaleString()}</div>
-                  <div className="col-total">₩{(item.unit_price * item.quantity).toLocaleString()}</div>
-                </div>
-              ))
-            ) : (
-              <div className="table-row empty">
-                <div className="col-product">주문 상품이 없습니다</div>
+            <div className="flex justify-between">
+              <dt className="text-ink-soft">배송비</dt>
+              <dd>{order.shipping_fee_cents ? formatPrice(order.shipping_fee_cents) : '무료'}</dd>
+            </div>
+            <div className="flex justify-between border-t border-line pt-2.5 font-bold">
+              <dt>총 결제 금액</dt>
+              <dd className="text-lg">{formatPrice(order.total_cents)}</dd>
+            </div>
+            {order.paid_at && (
+              <div className="flex justify-between text-sm text-ink-mute">
+                <dt>결제 일시</dt>
+                <dd>{formatDate(order.paid_at)}</dd>
               </div>
             )}
-          </div>
-        </div>
-
-        <div className="order-summary">
-          <div className="summary-row">
-            <span className="label">총액:</span>
-            <span className="amount">₩{order.total_amount.toLocaleString()}</span>
-          </div>
-        </div>
-
-        <div className="order-actions">
-          {order.status === 'pending' && (
-            <>
-              <button
-                className="btn btn-primary btn-large"
-                onClick={handleProceedToPayment}
-                disabled={cancelling}
-              >
-                결제 진행
-              </button>
-              <button
-                className="btn btn-danger btn-large"
-                onClick={handleCancel}
-                disabled={cancelling}
-              >
-                {cancelling ? '취소 중...' : '주문 취소'}
-              </button>
-            </>
-          )}
-          {order.status !== 'pending' && (
-            <Link to="/products" className="btn btn-primary btn-large">
-              계속 쇼핑하기
-            </Link>
-          )}
-        </div>
+          </dl>
+        </section>
       </div>
+
+      {order.history && order.history.length > 0 && (
+        <section className="mt-6 px-1">
+          <h2 className="text-[15px] font-bold">처리 이력</h2>
+          <ol className="mt-3 space-y-2 border-l-2 border-line pl-4 text-sm">
+            {order.history.map((h) => (
+              <li key={h.id}>
+                <span className="num text-ink-mute">{formatDate(h.created_at)}</span>{' '}
+                <span className="font-semibold">{formatOrderStatus(h.to_status)}</span>
+                {h.note && <span className="text-ink-soft"> — {h.note}</span>}
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+
+      <div className="mt-8 flex flex-wrap gap-2">
+        {canCancel && (
+          <button className="btn-danger" onClick={() => setCancelOpen(true)}>
+            주문 취소
+          </button>
+        )}
+        {['preparing', 'shipping', 'completed'].includes(order.status) && (
+          <p className="text-sm text-ink-mute">
+            교환·반품은 고객센터 {cfg.store.phone} 또는 {cfg.store.email}로 신청해 주세요.
+          </p>
+        )}
+      </div>
+
+      <Modal open={cancelOpen} onClose={() => setCancelOpen(false)} title="주문 취소">
+        <p className="text-[15px] text-ink-soft">
+          {order.status === 'paid'
+            ? `취소하면 ${formatPrice(order.total_cents)}이 결제 수단으로 환불됩니다.`
+            : '결제 전 주문이라 바로 취소됩니다.'}
+        </p>
+        <fieldset className="mt-4 space-y-2">
+          <legend className="field-label">취소 사유</legend>
+          {CANCEL_REASONS.map((r) => (
+            <label key={r} className="flex cursor-pointer items-center gap-2.5 rounded-md border border-line px-3.5 py-2.5 has-[:checked]:border-felt has-[:checked]:bg-felt-light">
+              <input type="radio" name="reason" className="accent-felt" checked={reason === r} onChange={() => setReason(r)} />
+              {r}
+            </label>
+          ))}
+        </fieldset>
+        <div className="mt-6 grid grid-cols-2 gap-2">
+          <button className="btn-outline" onClick={() => setCancelOpen(false)}>
+            돌아가기
+          </button>
+          <button className="btn-dark" onClick={cancel} disabled={cancelling}>
+            {cancelling ? '취소하는 중…' : '주문 취소하기'}
+          </button>
+        </div>
+      </Modal>
     </div>
   );
-}
+};
+
+export default OrderDetailPage;

@@ -1,96 +1,32 @@
 import { Request, Response, NextFunction } from 'express';
+import multer from 'multer';
+import { AppError, formatErrorResponse, ValidationError } from '../utils/errors.js';
+import { logger } from '../utils/logger.js';
 
-/**
- * 커스텀 에러 클래스
- */
-export class AppError extends Error {
-  constructor(
-    public statusCode: number,
-    message: string,
-  ) {
-    super(message);
-    Object.setPrototypeOf(this, AppError.prototype);
+export function errorHandler(error: unknown, req: Request, res: Response, _next: NextFunction): void {
+  let err = error;
+
+  // 업로드 오류를 사용자용 메시지로 변환
+  if (error instanceof multer.MulterError) {
+    err =
+      error.code === 'LIMIT_FILE_SIZE'
+        ? new ValidationError('이미지는 5MB 이하만 업로드할 수 있습니다.')
+        : new ValidationError('파일 업로드 형식이 올바르지 않습니다.');
   }
-}
-
-/**
- * 검증 에러
- */
-export class ValidationError extends AppError {
-  constructor(message: string) {
-    super(400, message);
-    Object.setPrototypeOf(this, ValidationError.prototype);
+  // 잘못된 JSON 본문
+  if ((error as any)?.type === 'entity.parse.failed') {
+    err = new ValidationError('요청 본문(JSON) 형식이 올바르지 않습니다.');
   }
-}
-
-/**
- * 인증 에러
- */
-export class AuthError extends AppError {
-  constructor(message: string = 'Unauthorized') {
-    super(401, message);
-    Object.setPrototypeOf(this, AuthError.prototype);
-  }
-}
-
-/**
- * 권한 에러
- */
-export class ForbiddenError extends AppError {
-  constructor(message: string = 'Forbidden') {
-    super(403, message);
-    Object.setPrototypeOf(this, ForbiddenError.prototype);
-  }
-}
-
-/**
- * 찾을 수 없음 에러
- */
-export class NotFoundError extends AppError {
-  constructor(message: string = 'Not found') {
-    super(404, message);
-    Object.setPrototypeOf(this, NotFoundError.prototype);
-  }
-}
-
-/**
- * 충돌 에러 (예: 중복된 이메일)
- */
-export class ConflictError extends AppError {
-  constructor(message: string = 'Conflict') {
-    super(409, message);
-    Object.setPrototypeOf(this, ConflictError.prototype);
-  }
-}
-
-/**
- * 전역 에러 핸들러 미들웨어
- * 모든 라우트 핸들러 이후에 등록해야 합니다.
- */
-export function errorHandler(
-  err: Error | AppError,
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): void {
-  console.error('[error]', err);
-
-  if (err instanceof AppError) {
-    res.status(err.statusCode).json({ error: err.message });
-    return;
+  if ((error as any)?.type === 'entity.too.large') {
+    err = new AppError(413, '요청 크기가 너무 큽니다.', 'PAYLOAD_TOO_LARGE');
   }
 
-  // 예상치 못한 에러
-  res.status(500).json({ error: 'Internal server error' });
-}
-
-/**
- * 비동기 라우트 핸들러를 감싸서 에러를 처리합니다.
- */
-export function asyncHandler(
-  fn: (req: Request, res: Response, next: NextFunction) => Promise<void>,
-): (req: Request, res: Response, next: NextFunction) => void {
-  return (req: Request, res: Response, next: NextFunction) => {
-    Promise.resolve(fn(req, res, next)).catch(next);
-  };
+  const { status, body } = formatErrorResponse(err);
+  if (status >= 500) {
+    logger.error('Unhandled error', { requestId: req.requestId, method: req.method, path: req.originalUrl, error: err });
+  } else {
+    logger.debug('Request failed', { requestId: req.requestId, status, code: body.code, message: body.error });
+  }
+  if (res.headersSent) return;
+  res.status(status).json({ ...body, ...(req.requestId ? { requestId: req.requestId } : {}) });
 }

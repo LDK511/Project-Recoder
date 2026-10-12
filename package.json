@@ -1,20 +1,17 @@
 {
   "name": "shopping-mall",
   "version": "1.0.0",
-  "description": "Full-stack e-commerce platform with mock payment",
+  "description": "Full-stack e-commerce platform with PostgreSQL, Express, and React",
   "private": true,
-  "workspaces": [
-    "backend",
-    "frontend"
-  ],
   "scripts": {
-    "dev": "npm run dev --workspaces",
-    "start": "npm start --workspace=backend",
-    "db:init": "npm run db:init --workspace=backend",
-    "db:reset": "npm run db:reset --workspace=backend",
-    "build": "npm --prefix frontend run build && npm run build --workspaces"
+    "install-all": "npm install && npm --prefix backend install && npm --prefix frontend install",
+    "dev": "concurrently \"npm --prefix backend run dev\" \"npm --prefix frontend run dev\"",
+    "build": "npm --prefix backend run build && npm --prefix frontend run build",
+    "start": "npm --prefix backend start",
+    "db:init": "npm --prefix backend run db:init",
+    "db:seed": "npm --prefix backend run db:seed"
   },
-  "engines": {
-    "node": ">=18.0.0"
+  "devDependencies": {
+    "concurrently": "^8.2.2"
   }
 }

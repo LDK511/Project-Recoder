@@ -1,208 +1,220 @@
-import express, { Request, Response } from 'express';
+import express, { Express, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
-import { initPool, closePool } from './db.js';
-import { errorHandler, asyncHandler } from './middleware/errorHandler.js';
-import { authMiddleware, adminMiddleware } from './middleware/auth.js';
-import { isTestPaymentMode, assertPaymentConfig, createStripeWebhookRouter } from './payments/stripe.js';
-import { processWebhook } from './services/payment.js';
-import { updateOrderStatus } from './services/order.js';
-import authRoutes from './routes/auth.js';
-import productRoutes from './routes/products.js';
-import cartRoutes from './routes/cart.js';
-import orderRoutes from './routes/orders.js';
-import paymentRoutes from './routes/payment.js';
-import adminRoutes from './routes/admin.js';
-import mockPaymentRoutes from './routes/mock-payment.js';
-import { HealthResponse } from './types.js';
+import helmet from 'helmet';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+import { closePool } from './config/database.js';
+import { config, isProduction } from './config/env.js';
+import { assertPaymentConfig, createStripeWebhookRouter, STRIPE_WEBHOOK_PATH, isTestPaymentMode } from './payments/stripe.js';
+import { errorHandler } from './middleware/errorHandler.js';
+import { requestLogger } from './middleware/requestLogger.js';
+import { apiLimiter } from './middleware/rateLimiter.js';
+import healthRouter, { configRouter } from './routes/health.js';
+import authRouter from './routes/auth.js';
+import productsRouter from './routes/products.js';
+import clientRouter from './routes/client.js';
+import cartRouter from './routes/cart.js';
+import ordersRouter from './routes/orders.js';
+import paymentRouter from './routes/payment.js';
+import adminRouter from './routes/admin.js';
+import { runMigrations } from './db/migrate.js';
+import { seedDatabase } from './db/seed.js';
+import { expirePendingOrders } from './services/orderService.js';
+import { handlePaymentSucceeded, handlePaymentFailed } from './services/paymentService.js';
+import { getUploadDir, initializeUploadsDir } from './utils/s3.js';
+import { NotFoundError } from './utils/errors.js';
+import { logger } from './utils/logger.js';
 
-// 환경변수 로드
-dotenv.config();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-// 결제 설정 검증
-assertPaymentConfig();
-
-const app = express();
-const port = process.env.PORT || 3000;
-
-// CORS 설정
-app.use(
-  cors({
-    origin: process.env.NODE_ENV === 'production' ? process.env.FRONTEND_URL : '*',
-    credentials: true,
-  }),
-);
-
-// 결제 웹훅 라우터 (JSON 파서보다 먼저 등록)
-app.use(
-  '/api/webhooks/stripe',
-  createStripeWebhookRouter({
-    onPaymentSucceeded: async (event) => {
-      console.log('[payment] Payment succeeded:', event);
-      const orderId = parseInt(event.orderId, 10);
-      await processWebhook({
-        eventId: event.eventId,
-        orderId,
-        paymentIntentId: event.paymentIntentId,
-        amount: event.amount,
-        currency: event.currency,
-        status: 'completed',
-      });
-    },
-    onPaymentFailed: async (event) => {
-      console.log('[payment] Payment failed:', event);
-      const orderId = parseInt(event.orderId, 10);
-      await processWebhook({
-        eventId: event.eventId,
-        orderId,
-        paymentIntentId: event.paymentIntentId,
-        amount: event.amount,
-        currency: event.currency,
-        status: 'failed',
-      });
-    },
-  }),
-);
-
-// JSON 파서
-app.use(express.json());
-
-// 헬스 체크 엔드포인트
-app.get(
-  '/health',
-  asyncHandler(async (req: Request, res: Response) => {
-    const response: HealthResponse = {
-      status: 'ok',
-      test_payment_mode: isTestPaymentMode(),
-    };
-    res.json(response);
-  }),
-);
-
-// API 라우트
-app.use('/api/auth', authRoutes);
-app.use('/api/products', productRoutes);
-app.use('/api/cart', cartRoutes);
-app.use('/api/orders', orderRoutes);
-app.use('/api/payment', paymentRoutes);
-app.use('/api/admin', adminRoutes);
-app.use('/api/mock-payment', mockPaymentRoutes);
-
-// 정적 파일 제공 (프론트엔드 빌드 폴더)
-if (process.env.NODE_ENV !== 'development') {
-  app.use(express.static('frontend/dist'));
-  // SPA 라우팅: 모든 미매칭 경로를 index.html로 리다이렉트
-  app.get('*', (req: Request, res: Response) => {
-    res.sendFile('frontend/dist/index.html', { root: process.cwd() });
-  });
-}
-
-// 전역 에러 핸들러
-app.use(errorHandler);
-
-// 데이터베이스 초기화 및 데모 데이터 시드
-async function initializeDatabase(): Promise<void> {
-  try {
-    const pool = initPool();
-    console.log('[db] Database pool initialized');
-
-    // 데모 데이터 시드 (SEED_DEMO=true 일 때)
-    if (process.env.SEED_DEMO === 'true') {
-      const { query } = await import('./db.js');
-      const productCount = await query('SELECT COUNT(*) as count FROM products');
-      const count = parseInt(productCount.rows[0]?.count || '0', 10);
-
-      if (count === 0) {
-        console.log('[db] Seeding demo products...');
-        const demoProducts = [
-          {
-            name: '무선 이어폰',
-            description: '고음질 무선 이어폰',
-            price: 89000,
-            stock: 50,
-            image_url: 'https://placehold.co/300x200?text=무선이어폰',
-          },
-          {
-            name: '스마트워치',
-            description: '피트니스 추적 기능이 있는 스마트워치',
-            price: 199000,
-            stock: 30,
-            image_url: 'https://placehold.co/300x200?text=스마트워치',
-          },
-          {
-            name: '휴대용 충전기',
-            description: '20000mAh 대용량 휴대용 충전기',
-            price: 39000,
-            stock: 100,
-            image_url: 'https://placehold.co/300x200?text=충전기',
-          },
-          {
-            name: 'USB-C 케이블',
-            description: '고속 충전 USB-C 케이블',
-            price: 15000,
-            stock: 200,
-            image_url: 'https://placehold.co/300x200?text=USB케이블',
-          },
-          {
-            name: '블루투스 스피커',
-            description: '방수 블루투스 스피커',
-            price: 79000,
-            stock: 40,
-            image_url: 'https://placehold.co/300x200?text=스피커',
-          },
-        ];
-
-        for (const product of demoProducts) {
-          await query(
-            `INSERT INTO products (name, description, price, stock, image_url, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-            [product.name, product.description, product.price, product.stock, product.image_url],
-          );
-        }
-        console.log('[db] Demo products seeded successfully');
-      }
-    }
-  } catch (err) {
-    console.error('[db] Failed to initialize database:', err);
-    throw err;
+/** 필수 환경변수와 위험한 설정을 시작 시점에 검사합니다. */
+function validateEnvironment(): void {
+  const missing = ['DATABASE_URL', 'JWT_SECRET'].filter((k) => !process.env[k]);
+  if (missing.length > 0) {
+    throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
+  }
+  const jwtSecret = process.env.JWT_SECRET!;
+  if (jwtSecret.length < 32) {
+    throw new Error('JWT_SECRET must be at least 32 characters long');
+  }
+  if (isProduction && /your_jwt_secret|change_me|example/i.test(jwtSecret)) {
+    throw new Error('JWT_SECRET 이 예시 값입니다. 운영에서는 무작위 값(예: openssl rand -base64 48)으로 바꾸세요.');
+  }
+  assertPaymentConfig();
+  if (isProduction && process.env.SEED_DEMO === 'true') {
+    logger.warn('SEED_DEMO=true in production: 데모 관리자 계정(admin@example.com)이 만들어집니다. 오픈 전 비밀번호를 바꾸거나 계정을 삭제하세요.');
   }
 }
 
-// 서버 시작
-async function start(): Promise<void> {
-  try {
-    // 데이터베이스 초기화
-    await initializeDatabase();
+/** 프런트엔드 빌드 폴더 후보 (배포 구조에 따라 위치가 다를 수 있음) */
+function findFrontendBuildDir(): string | null {
+  const candidates = [
+    process.env.FRONTEND_DIST_DIR,
+    path.join(__dirname, '..', '..', 'frontend', 'dist'),
+    path.join(process.cwd(), '..', 'frontend', 'dist'),
+    path.join(process.cwd(), 'public'),
+  ].filter(Boolean) as string[];
+  return candidates.find((dir) => fs.existsSync(path.join(dir, 'index.html'))) ?? null;
+}
 
-    // 서버 시작
-    app.listen(port, () => {
-      console.log(`[server] Server running on port ${port}`);
-      console.log(`[server] Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`[server] Payment mode: ${process.env.PAYMENT_MODE || 'production'}`);
-      if (isTestPaymentMode()) {
-        console.log(`[server] Test payment mode enabled (mock server at ${process.env.STRIPE_MOCK_HOST}:${process.env.STRIPE_MOCK_PORT})`);
-      }
+function createApp(): Express {
+  const app = express();
+  app.disable('x-powered-by');
+  // 로드밸런서/리버스 프록시 뒤에서 실제 클라이언트 IP·프로토콜을 인식 (rate limit, 결제 리턴 URL)
+  app.set('trust proxy', config.trustProxy);
+
+  // 보안 헤더. CSP 는 결제(Stripe)·주소검색(다음 우편번호)·상품 이미지(외부 CDN)를 허용하도록 맞췄습니다.
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        useDefaults: true,
+        directives: {
+          'script-src': ["'self'", 'https://js.stripe.com', 'https://t1.daumcdn.net', 'https://t1.kakaocdn.net', 'http://dmaps.daum.net'],
+          'frame-src': ["'self'", 'https://js.stripe.com', 'https://hooks.stripe.com', 'https://postcode.map.daum.net', 'http://postcode.map.daum.net'],
+          'img-src': ["'self'", 'data:', 'blob:', 'https:'],
+          'connect-src': ["'self'", 'https://api.stripe.com'],
+          'style-src': ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+          'font-src': ["'self'", 'data:', 'https://fonts.gstatic.com', 'https://cdn.jsdelivr.net'],
+          'form-action': ["'self'", 'http:', 'https:'],
+          'upgrade-insecure-requests': isProduction && process.env.DISABLE_HTTPS_UPGRADE !== 'true' ? [] : null,
+        },
+      },
+      crossOriginEmbedderPolicy: false,
+      // HTTPS 를 쓰지 않는 로컬/데모 환경에서 HSTS 가 브라우저에 남지 않도록 운영에서만 켭니다.
+      strictTransportSecurity: isProduction ? { maxAge: 15552000, includeSubDomains: true } : false,
+    })
+  );
+
+  app.use(
+    cors({
+      origin: (origin, cb) => {
+        // 같은 출처 요청(origin 없음)과 허용 목록만 통과
+        if (!origin || config.frontendUrls.includes(origin)) return cb(null, true);
+        return cb(null, false);
+      },
+      credentials: true,
+      methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
+      exposedHeaders: ['X-Request-Id'],
+      maxAge: 600,
+    })
+  );
+
+  app.use(requestLogger);
+
+  // 헬스체크
+  app.use('/health', healthRouter);
+  app.use('/api/health', healthRouter);
+
+  // 결제 웹훅 (서명 검증을 위해 raw body 가 필요하므로 JSON 파서보다 먼저)
+  app.use(
+    STRIPE_WEBHOOK_PATH,
+    createStripeWebhookRouter({
+      onPaymentSucceeded: handlePaymentSucceeded,
+      onPaymentFailed: handlePaymentFailed,
+    })
+  );
+
+  app.use(express.json({ limit: '1mb' }));
+  app.use(express.urlencoded({ limit: '1mb', extended: false }));
+
+  app.use('/api/', apiLimiter);
+  app.use('/api/config', configRouter);
+  app.use('/api/auth', authRouter);
+  app.use('/api/products', productsRouter);
+  app.use('/api/client', clientRouter);
+  app.use('/api/cart', cartRouter);
+  app.use('/api/orders', ordersRouter);
+  app.use('/api/payment', paymentRouter);
+  app.use('/api/admin', adminRouter);
+  app.use('/api', (_req, _res, next) => next(new NotFoundError('요청한 API 를 찾을 수 없습니다.')));
+
+  // 업로드한 상품 이미지 (로컬 저장소 사용 시)
+  app.use('/uploads', express.static(getUploadDir(), { maxAge: '30d', immutable: true, fallthrough: false }));
+
+  // 프런트엔드 정적 파일 + SPA 라우팅 (개발 모드에서는 Vite 개발 서버가 담당)
+  const frontendBuildDir = config.nodeEnv !== 'development' ? findFrontendBuildDir() : null;
+  if (frontendBuildDir) {
+    logger.info('Serving frontend build', { dir: frontendBuildDir });
+    app.use(
+      express.static(frontendBuildDir, {
+        index: false,
+        setHeaders: (res, filePath) => {
+          // 해시가 붙은 빌드 산출물은 1년 캐시, 그 외는 매번 확인
+          if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          } else {
+            res.setHeader('Cache-Control', 'public, max-age=3600');
+          }
+        },
+      })
+    );
+    app.get('*', (req: Request, res: Response, next: NextFunction) => {
+      if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) return next();
+      res.setHeader('Cache-Control', 'no-cache');
+      res.sendFile(path.join(frontendBuildDir, 'index.html'));
     });
-  } catch (err) {
-    console.error('[server] Failed to start server:', err);
+  }
+
+  app.use((_req: Request, res: Response) => {
+    res.status(404).json({ error: '페이지를 찾을 수 없습니다.', code: 'NOT_FOUND' });
+  });
+  app.use(errorHandler);
+  return app;
+}
+
+async function startServer(): Promise<void> {
+  try {
+    validateEnvironment();
+    logger.info('Environment variables validated');
+
+    await runMigrations();
+    logger.info('Database migrations are up to date');
+    if (process.env.SEED_DEMO === 'true') {
+      await seedDatabase();
+    }
+    await initializeUploadsDir();
+
+    const app = createApp();
+    const server = app.listen(config.port, () => {
+      logger.info(`Server started on port ${config.port}`, {
+        env: config.nodeEnv,
+        testPaymentMode: isTestPaymentMode(),
+      });
+    });
+    // 느린 클라이언트로부터 연결 고갈 방지
+    server.headersTimeout = 65_000;
+    server.requestTimeout = 60_000;
+
+    // 결제 시간이 지난 주문 자동 만료(재고 복구) — 1분마다
+    const sweeper = setInterval(() => {
+      expirePendingOrders().catch((error) => logger.error('Order expiry job failed', { error }));
+    }, 60_000);
+    sweeper.unref();
+    expirePendingOrders().catch((error) => logger.error('Order expiry job failed', { error }));
+
+    let shuttingDown = false;
+    const shutdown = (signal: string) => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      logger.info(`${signal} received, shutting down gracefully`);
+      clearInterval(sweeper);
+      server.close(async () => {
+        await closePool().catch(() => undefined);
+        logger.info('Server closed');
+        process.exit(0);
+      });
+      setTimeout(() => process.exit(1), 10_000).unref();
+    };
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('unhandledRejection', (reason) => logger.error('Unhandled promise rejection', { reason: String(reason) }));
+  } catch (error) {
+    logger.error('Failed to start server', { error });
     process.exit(1);
   }
 }
 
-// 우아한 종료
-process.on('SIGTERM', async () => {
-  console.log('[server] SIGTERM received, shutting down gracefully...');
-  await closePool();
-  process.exit(0);
-});
-
-process.on('SIGINT', async () => {
-  console.log('[server] SIGINT received, shutting down gracefully...');
-  await closePool();
-  process.exit(0);
-});
-
-// 서버 시작
-start();
-
-export default app;
+startServer();

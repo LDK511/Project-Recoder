@@ -1,224 +1,98 @@
-import { Router, Request, Response } from 'express';
-import { authMiddleware, getUser, adminMiddleware } from '../middleware/auth.js';
-import { asyncHandler, ValidationError, NotFoundError } from '../middleware/errorHandler.js';
-import { isPositiveInteger, normalizePageNumber, normalizeLimitNumber, normalizeSearchQuery } from '../utils/validation.js';
-import { query } from '../db.js';
-import { Product } from '../types.js';
+import { Router } from 'express';
+import multer from 'multer';
+import { authenticate, authorize } from '../middleware/auth.js';
+import { asyncHandler } from '../middleware/validateRequest.js';
+import * as productService from '../services/productService.js';
+import { MAX_IMAGE_BYTES } from '../utils/s3.js';
+import { ValidationError } from '../utils/errors.js';
+import { parseId, parsePagination, optionalTrimmed } from '../utils/validation.js';
 
 const router = Router();
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_IMAGE_BYTES, files: 1 } });
 
-const DEFAULT_PAGE = 1;
-const DEFAULT_LIMIT = 20;
-const MAX_LIMIT = 100;
+export function parseListQuery(q: Record<string, unknown>, maxLimit = 60) {
+  const { page, limit } = parsePagination(q, 12, maxLimit);
+  const sort = (q.sort as string) || 'newest';
+  if (!(productService.PRODUCT_SORTS as readonly string[]).includes(sort)) {
+    throw new ValidationError('정렬 옵션이 올바르지 않습니다.');
+  }
+  return {
+    page,
+    limit,
+    sort: sort as productService.ProductSort,
+    search: optionalTrimmed(q.search, 100) ?? undefined,
+    category: optionalTrimmed(q.category, 50) ?? undefined,
+  };
+}
 
-/**
- * GET /api/products
- * 상품 목록 조회 (페이지네이션, 검색 지원)
- */
+/** GET /api/products?page&limit&search&category&sort — 판매 중인 상품 목록 */
 router.get(
   '/',
-  asyncHandler(async (req: Request, res: Response) => {
-    const page = normalizePageNumber(req.query.page, DEFAULT_PAGE);
-    const limit = normalizeLimitNumber(req.query.limit, DEFAULT_LIMIT, MAX_LIMIT);
-    const search = normalizeSearchQuery(req.query.search);
-
-    const offset = (page - 1) * limit;
-
-    let countQuery = 'SELECT COUNT(*) as total FROM products';
-    let dataQuery = 'SELECT * FROM products';
-    const params: any[] = [];
-
-    if (search) {
-      const searchPattern = `%${search}%`;
-      countQuery += ' WHERE name ILIKE $1 OR description ILIKE $1';
-      dataQuery += ' WHERE name ILIKE $1 OR description ILIKE $1';
-      params.push(searchPattern);
-    }
-
-    // 총 개수 조회
-    const countResult = await query<{ total: string }>(
-      countQuery,
-      params,
-    );
-    const total = parseInt(countResult.rows[0]?.total || '0', 10);
-
-    // 상품 목록 조회
-    dataQuery += ' ORDER BY created_at DESC LIMIT $' + (params.length + 1) + ' OFFSET $' + (params.length + 2);
-    params.push(limit, offset);
-
-    const result = await query<Product>(
-      dataQuery,
-      params,
-    );
-
-    res.json({
-      items: result.rows,
-      total,
-      page,
-      limit,
-    });
-  }),
+  asyncHandler(async (req, res) => {
+    const opts = parseListQuery(req.query as Record<string, unknown>);
+    const result = await productService.getProducts(opts);
+    res.set('Cache-Control', 'public, max-age=15');
+    res.json({ data: result.products, pagination: result.pagination });
+  })
 );
 
-/**
- * GET /api/products/:id
- * 상품 상세 조회
- */
+/** GET /api/products/categories — 카테고리와 상품 수 */
+router.get(
+  '/categories',
+  asyncHandler(async (_req, res) => {
+    res.set('Cache-Control', 'public, max-age=60');
+    res.json({ data: await productService.getCategories() });
+  })
+);
+
+/** GET /api/products/:id */
 router.get(
   '/:id',
-  asyncHandler(async (req: Request, res: Response) => {
-    const { id } = req.params;
-
-    if (!isPositiveInteger(id)) {
-      throw new ValidationError('유효한 상품 ID를 입력하세요');
-    }
-
-    const result = await query<Product>(
-      'SELECT * FROM products WHERE id = $1',
-      [parseInt(id, 10)],
-    );
-
-    if (result.rows.length === 0) {
-      throw new NotFoundError('상품을 찾을 수 없습니다');
-    }
-
-    res.json(result.rows[0]);
-  }),
+  asyncHandler(async (req, res) => {
+    const product = await productService.getProductById(parseId(req.params.id, '상품 번호'));
+    res.json(product);
+  })
 );
 
-/**
- * POST /api/products
- * 상품 생성 (관리자만)
- */
+/** POST /api/products (관리자, multipart: image 파일 + 필드) */
 router.post(
   '/',
-  authMiddleware,
-  adminMiddleware,
-  asyncHandler(async (req: Request, res: Response) => {
-    const { name, description, price, stock, image_url } = req.body;
-
-    // 입력 검증
-    if (!name || typeof name !== 'string' || name.trim().length === 0) {
-      throw new ValidationError('상품명을 입력하세요');
-    }
-
-    if (!isPositiveInteger(price)) {
-      throw new ValidationError('가격은 0보다 큰 정수여야 합니다');
-    }
-
-    if (!isPositiveInteger(stock)) {
-      throw new ValidationError('재고는 0보다 큰 정수여야 합니다');
-    }
-
-    const priceInt = parseInt(price, 10);
-    const stockInt = parseInt(stock, 10);
-
-    const result = await query<Product>(
-      `INSERT INTO products (name, description, price, stock, image_url, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-       RETURNING *`,
-      [
-        name.trim(),
-        description || null,
-        priceInt,
-        stockInt,
-        image_url || null,
-      ],
-    );
-
-    res.status(201).json(result.rows[0]);
-  }),
+  authenticate,
+  authorize('admin'),
+  upload.single('image'),
+  asyncHandler(async (req, res) => {
+    const product = await productService.createProduct({ ...req.body, image: req.file?.buffer });
+    res.status(201).json(product);
+  })
 );
 
-/**
- * PUT /api/products/:id
- * 상품 수정 (관리자만)
- */
+/** PUT /api/products/:id (관리자, multipart) */
 router.put(
   '/:id',
-  authMiddleware,
-  adminMiddleware,
-  asyncHandler(async (req: Request, res: Response) => {
-    const { id } = req.params;
-    const { name, description, price, stock, image_url } = req.body;
+  authenticate,
+  authorize('admin'),
+  upload.single('image'),
+  asyncHandler(async (req, res) => {
+    const product = await productService.updateProduct(parseId(req.params.id, '상품 번호'), {
+      ...req.body,
+      image: req.file?.buffer,
+    });
+    res.json(product);
+  })
+);
 
-    if (!isPositiveInteger(id)) {
-      throw new ValidationError('유효한 상품 ID를 입력하세요');
-    }
-
-    const productId = parseInt(id, 10);
-
-    // 상품 존재 확인
-    const existingProduct = await query<Product>(
-      'SELECT * FROM products WHERE id = $1',
-      [productId],
-    );
-
-    if (existingProduct.rows.length === 0) {
-      throw new NotFoundError('상품을 찾을 수 없습니다');
-    }
-
-    const current = existingProduct.rows[0];
-
-    // 업데이트할 필드 준비
-    const updates: string[] = [];
-    const values: any[] = [];
-    let paramIndex = 1;
-
-    if (name !== undefined) {
-      if (typeof name !== 'string' || name.trim().length === 0) {
-        throw new ValidationError('상품명을 입력하세요');
-      }
-      updates.push(`name = $${paramIndex}`);
-      values.push(name.trim());
-      paramIndex++;
-    }
-
-    if (description !== undefined) {
-      updates.push(`description = $${paramIndex}`);
-      values.push(description || null);
-      paramIndex++;
-    }
-
-    if (price !== undefined) {
-      if (!isPositiveInteger(price)) {
-        throw new ValidationError('가격은 0보다 큰 정수여야 합니다');
-      }
-      updates.push(`price = $${paramIndex}`);
-      values.push(parseInt(price, 10));
-      paramIndex++;
-    }
-
-    if (stock !== undefined) {
-      if (!isPositiveInteger(stock)) {
-        throw new ValidationError('재고는 0보다 큰 정수여야 합니다');
-      }
-      updates.push(`stock = $${paramIndex}`);
-      values.push(parseInt(stock, 10));
-      paramIndex++;
-    }
-
-    if (image_url !== undefined) {
-      updates.push(`image_url = $${paramIndex}`);
-      values.push(image_url || null);
-      paramIndex++;
-    }
-
-    if (updates.length === 0) {
-      res.json(current);
-      return;
-    }
-
-    updates.push(`updated_at = CURRENT_TIMESTAMP`);
-    values.push(productId);
-
-    const result = await query<Product>(
-      `UPDATE products SET ${updates.join(', ')} WHERE id = $${paramIndex} RETURNING *`,
-      values,
-    );
-
-    res.json(result.rows[0]);
-  }),
+/** DELETE /api/products/:id (관리자) — 주문 이력이 있으면 판매중지로 전환 */
+router.delete(
+  '/:id',
+  authenticate,
+  authorize('admin'),
+  asyncHandler(async (req, res) => {
+    const result = await productService.deleteProduct(parseId(req.params.id, '상품 번호'));
+    res.json({
+      message: result.deleted ? '상품을 삭제했습니다.' : '주문 이력이 있어 판매 중지(숨김) 처리했습니다.',
+      ...result,
+    });
+  })
 );
 
 export default router;

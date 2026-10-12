@@ -1,82 +1,53 @@
-import { Router, Request, Response } from 'express';
-import { authMiddleware, getUser } from '../middleware/auth.js';
-import { asyncHandler, ValidationError } from '../middleware/errorHandler.js';
-import { getCart, addToCart, removeFromCart, clearCart } from '../services/cart.js';
-import { isPositiveInteger } from '../utils/validation.js';
+import { Router } from 'express';
+import { authenticate, getUserId } from '../middleware/auth.js';
+import { asyncHandler } from '../middleware/validateRequest.js';
+import { getCart, addToCart, updateCartItem, removeFromCart, clearCart } from '../services/cartService.js';
+import { parseId } from '../utils/validation.js';
 
 const router = Router();
+router.use(authenticate);
 
-/**
- * GET /api/cart
- * 현재 사용자의 장바구니를 조회합니다.
- */
+/** GET /api/cart → { items, total_cents, item_count } */
 router.get(
   '/',
-  authMiddleware,
-  asyncHandler(async (req: Request, res: Response) => {
-    const user = getUser(req);
-    const cart = await getCart(user.id);
-    res.json(cart);
-  }),
+  asyncHandler(async (req, res) => {
+    res.json(await getCart(getUserId(req)));
+  })
 );
 
-/**
- * POST /api/cart/add
- * 장바구니에 상품을 추가합니다.
- * 요청: { product_id: number, quantity: number }
- */
+/** POST /api/cart/items { product_id, quantity } — 이미 담긴 상품이면 수량 추가 */
 router.post(
-  '/add',
-  authMiddleware,
-  asyncHandler(async (req: Request, res: Response) => {
-    const user = getUser(req);
-    const { product_id, quantity } = req.body;
-
-    // 입력 검증
-    if (!isPositiveInteger(product_id)) {
-      throw new ValidationError('product_id must be a positive integer');
-    }
-    if (!isPositiveInteger(quantity)) {
-      throw new ValidationError('quantity must be a positive integer');
-    }
-
-    const cart = await addToCart(user.id, Number(product_id), Number(quantity));
-    res.json(cart);
-  }),
+  '/items',
+  asyncHandler(async (req, res) => {
+    const item = await addToCart(getUserId(req), req.body ?? {});
+    res.status(201).json(item);
+  })
 );
 
-/**
- * DELETE /api/cart/remove/:product_id
- * 장바구니에서 상품을 제거합니다.
- */
+/** PUT /api/cart/items/:id { quantity } */
+router.put(
+  '/items/:id',
+  asyncHandler(async (req, res) => {
+    res.json(await updateCartItem(getUserId(req), parseId(req.params.id), req.body ?? {}));
+  })
+);
+
+/** DELETE /api/cart/items/:id */
 router.delete(
-  '/remove/:product_id',
-  authMiddleware,
-  asyncHandler(async (req: Request, res: Response) => {
-    const user = getUser(req);
-    const { product_id } = req.params;
-
-    if (!isPositiveInteger(product_id)) {
-      throw new ValidationError('product_id must be a positive integer');
-    }
-
-    const cart = await removeFromCart(user.id, Number(product_id));
-    res.json(cart);
-  }),
+  '/items/:id',
+  asyncHandler(async (req, res) => {
+    await removeFromCart(getUserId(req), parseId(req.params.id));
+    res.json({ message: 'success' });
+  })
 );
 
-/**
- * POST /api/cart/clear
- * 장바구니를 비웁니다.
- */
-router.post(
-  '/clear',
-  authMiddleware,
-  asyncHandler(async (req: Request, res: Response) => {
-    const user = getUser(req);
-    const cart = await clearCart(user.id);
-    res.json(cart);
-  }),
+/** DELETE /api/cart — 전체 비우기 */
+router.delete(
+  '/',
+  asyncHandler(async (req, res) => {
+    await clearCart(getUserId(req));
+    res.json({ message: 'success' });
+  })
 );
 
 export default router;

@@ -1,134 +1,115 @@
 /**
- * 입력 검증 유틸리티
+ * 입력값 검증/정규화 도우미.
+ * 쿼리스트링과 multipart 폼은 값이 문자열로 오므로, 숫자 검증은 문자열도 받아 정수로 변환합니다.
  */
+import { ValidationError } from './errors.js';
 
-/**
- * 이메일 형식을 검증합니다.
- */
-export function isValidEmail(email: string): boolean {
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  return emailRegex.test(email);
+export interface FieldError {
+  field: string;
+  message: string;
 }
 
-/**
- * 비밀번호 길이를 검증합니다 (최소 8자).
- */
-export function isValidPassword(password: string): boolean {
-  return password && password.length >= 8;
-}
-
-/**
- * 이름이 비어있지 않은지 검증합니다.
- */
-export function isValidName(name: string): boolean {
-  return name && name.trim().length > 0;
-}
-
-/**
- * 양의 정수인지 검증합니다.
- */
-export function isPositiveInteger(value: any): boolean {
-  const num = Number(value);
-  return Number.isInteger(num) && num > 0;
-}
-
-/**
- * 음이 아닌 정수인지 검증합니다.
- */
-export function isNonNegativeInteger(value: any): boolean {
-  const num = Number(value);
-  return Number.isInteger(num) && num >= 0;
-}
-
-/**
- * 페이지 번호를 검증하고 정규화합니다.
- */
-export function normalizePageNumber(page: any, defaultPage: number = 1): number {
-  const num = Number(page);
-  if (!Number.isInteger(num) || num < 1) {
-    return defaultPage;
+/** 문자열/숫자를 정수로 변환. 정수가 아니면 null */
+export function toInt(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isInteger(value) ? value : null;
+  if (typeof value === 'string' && /^-?\d+$/.test(value.trim())) {
+    const n = Number(value.trim());
+    return Number.isSafeInteger(n) ? n : null;
   }
-  return num;
+  return null;
 }
 
-/**
- * 페이지 크기를 검증하고 정규화합니다.
- */
-export function normalizeLimitNumber(limit: any, defaultLimit: number = 20, maxLimit: number = 100): number {
-  const num = Number(limit);
-  if (!Number.isInteger(num) || num < 1) {
-    return defaultLimit;
+export function validateEmail(email: unknown): email is string {
+  return typeof email === 'string' && email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+/** 8자 이상, 영문과 숫자를 각각 1자 이상 포함 */
+export function validatePassword(password: unknown): password is string {
+  return (
+    typeof password === 'string' &&
+    password.length >= 8 &&
+    password.length <= 72 && // bcrypt 는 72바이트까지만 사용
+    /[A-Za-z]/.test(password) &&
+    /\d/.test(password)
+  );
+}
+
+export function validatePositiveInteger(value: unknown): boolean {
+  const n = toInt(value);
+  return n !== null && n > 0;
+}
+
+export function validateNonNegativeInteger(value: unknown): boolean {
+  const n = toInt(value);
+  return n !== null && n >= 0;
+}
+
+export function validateString(value: unknown, minLength = 1, maxLength = 255): value is string {
+  return typeof value === 'string' && value.trim().length >= minLength && value.length <= maxLength;
+}
+
+export const MAX_QUANTITY_PER_ITEM = 99;
+
+export function validateQuantity(value: unknown): boolean {
+  const n = toInt(value);
+  return n !== null && n >= 1 && n <= MAX_QUANTITY_PER_ITEM;
+}
+
+export function validateUUID(value: unknown): boolean {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
+/** 휴대폰/일반전화 (숫자만 9~11자리) */
+export function normalizePhone(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const digits = value.replace(/\D/g, '');
+  if (!/^0\d{8,10}$/.test(digits)) return null;
+  if (digits.length === 11) return `${digits.slice(0, 3)}-${digits.slice(3, 7)}-${digits.slice(7)}`;
+  if (digits.startsWith('02')) {
+    return digits.length === 9
+      ? `02-${digits.slice(2, 5)}-${digits.slice(5)}`
+      : `02-${digits.slice(2, 6)}-${digits.slice(6)}`;
   }
-  if (num > maxLimit) {
-    return maxLimit;
-  }
-  return num;
+  return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
 }
 
-/**
- * 검색 문자열을 정규화합니다 (공백 제거, 길이 제한).
- */
-export function normalizeSearchQuery(query: any, maxLength: number = 100): string {
-  if (typeof query !== 'string') {
-    return '';
-  }
-  return query.trim().slice(0, maxLength);
+/** 우편번호(5자리 도로명 우편번호) */
+export function validatePostalCode(value: unknown): value is string {
+  return typeof value === 'string' && /^\d{5}$/.test(value.trim());
 }
 
-/**
- * UUID 형식을 검증합니다.
- */
-export function isValidUUID(uuid: string): boolean {
-  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  return uuidRegex.test(uuid);
+export function parsePagination(query: Record<string, unknown>, defaultLimit = 20, maxLimit = 100) {
+  const page = toInt(query.page) ?? 1;
+  const limit = toInt(query.limit) ?? defaultLimit;
+  if (page < 1) throw new ValidationError('page 는 1 이상이어야 합니다.');
+  if (limit < 1 || limit > maxLimit) throw new ValidationError(`limit 은 1~${maxLimit} 사이여야 합니다.`);
+  return { page, limit, offset: (page - 1) * limit };
 }
 
-/**
- * IP 주소를 추출합니다 (프록시 고려).
- */
-export function getClientIP(req: any): string {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string') {
-    return forwarded.split(',')[0].trim();
-  }
-  return req.socket?.remoteAddress || req.connection?.remoteAddress || 'unknown';
+export function parseId(value: unknown, label = 'id'): number {
+  const n = toInt(value);
+  if (n === null || n < 1) throw new ValidationError(`${label} 가 올바르지 않습니다.`);
+  return n;
 }
 
-/**
- * 통화 코드를 검증합니다.
- */
-export function isValidCurrency(currency: string): boolean {
-  const validCurrencies = ['KRW', 'USD', 'EUR', 'JPY', 'GBP', 'CNY'];
-  return validCurrencies.includes(currency.toUpperCase());
+export function optionalTrimmed(value: unknown, maxLength: number): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') throw new ValidationError('문자열 값이 필요합니다.');
+  const t = value.trim();
+  if (t.length > maxLength) throw new ValidationError(`최대 ${maxLength}자까지 입력할 수 있습니다.`);
+  return t.length ? t : null;
 }
 
-/**
- * 주문 상태를 검증합니다.
- */
-export function isValidOrderStatus(status: string): boolean {
-  const validStatuses = ['pending', 'paid', 'completed', 'cancelled'];
-  return validStatuses.includes(status.toLowerCase());
+export function validatePageNumber(page: unknown): boolean {
+  const n = toInt(page);
+  return n !== null && n >= 1;
 }
 
-/**
- * 결제 상태를 검증합니다.
- */
-export function isValidPaymentStatus(status: string): boolean {
-  const validStatuses = ['pending', 'completed', 'failed'];
-  return validStatuses.includes(status.toLowerCase());
+export function validateLimit(limit: unknown, max = 100): boolean {
+  const n = toInt(limit);
+  return n !== null && n >= 1 && n <= max;
 }
 
-/**
- * 사용자 역할을 검증합니다.
- */
-export function isValidRole(role: string): boolean {
-  const validRoles = ['user', 'admin'];
-  return validRoles.includes(role.toLowerCase());
-}
-
-/**
- * 멱등성 키 형식을 검증합니다.
- */
-export function isValidIdempotencyKey(key: string): boolean {
-  return key && key.length > 0 && key.length <= 255;
+export function validateSortOption(sort: unknown, validOptions: readonly string[]): boolean {
+  return typeof sort === 'string' && validOptions.includes(sort);
 }

@@ -1,146 +1,88 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
-import { getCurrentUser, login as apiLogin, register as apiRegister } from '../api/client';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { authAPI } from '../api/client';
+import type { User } from '../types';
+import { clearAuthStorage, getToken, getUser, saveToken, saveUser } from '../utils/storage';
 
-/**
- * 사용자 정보 타입
- */
-export interface User {
-  id: number;
-  email: string;
-  name: string;
-  role: 'user' | 'admin';
-}
-
-/**
- * 인증 컨텍스트 타입
- */
-interface AuthContextType {
+export interface AuthContextType {
   user: User | null;
+  token: string | null;
   isLoading: boolean;
   isAuthenticated: boolean;
-  login: (email: string, password: string) => Promise<void>;
-  register: (email: string, password: string, name: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<User>;
+  register: (email: string, password: string, name: string) => Promise<User>;
   logout: () => void;
-  checkAuth: () => Promise<void>;
 }
 
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
+export const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-/**
- * 인증 상태 제공자
- */
-export function AuthProvider({ children }: { children: React.ReactNode }): React.ReactElement {
-  const [user, setUser] = useState<User | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [user, setUser] = useState<User | null>(() => getUser());
+  const [token, setToken] = useState<string | null>(() => getToken());
+  const [isLoading, setIsLoading] = useState<boolean>(() => !!getToken());
 
-  /**
-   * 저장된 토큰과 사용자 정보로 인증 상태 복구
-   */
-  const checkAuth = useCallback(async (): Promise<void> => {
-    const token = localStorage.getItem('auth_token');
-    if (!token) {
-      setUser(null);
-      setIsLoading(false);
-      return;
-    }
-
-    try {
-      const currentUser = await getCurrentUser();
-      setUser(currentUser);
-    } catch (error) {
-      console.error('[auth] Failed to get current user', error);
-      localStorage.removeItem('auth_token');
-      localStorage.removeItem('user');
-      setUser(null);
-    } finally {
-      setIsLoading(false);
-    }
+  // 저장된 토큰이 아직 유효한지 서버에 확인 (만료됐으면 로그아웃 상태로)
+  useEffect(() => {
+    if (!getToken()) return;
+    let cancelled = false;
+    authAPI
+      .me()
+      .then((r) => {
+        if (cancelled) return;
+        setUser(r.data.user);
+        saveUser(r.data.user);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        clearAuthStorage();
+        setUser(null);
+        setToken(null);
+      })
+      .finally(() => !cancelled && setIsLoading(false));
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  /**
-   * 로그인
-   */
-  const login = useCallback(async (email: string, password: string): Promise<void> => {
-    try {
-      const response = await apiLogin({ email, password });
-      localStorage.setItem('auth_token', response.token);
-      localStorage.setItem('user', JSON.stringify(response));
-      setUser({
-        id: response.id,
-        email: response.email,
-        name: response.name,
-        role: response.role as 'user' | 'admin',
-      });
-    } catch (error) {
-      console.error('[auth] Login failed', error);
-      throw error;
-    }
+  const apply = useCallback((u: User, t: string) => {
+    saveToken(t);
+    saveUser(u);
+    setToken(t);
+    setUser(u);
+    return u;
   }, []);
 
-  /**
-   * 회원가입
-   */
-  const register = useCallback(
-    async (email: string, password: string, name: string): Promise<void> => {
-      try {
-        const response = await apiRegister({ email, password, name });
-        localStorage.setItem('auth_token', response.token);
-        localStorage.setItem('user', JSON.stringify(response));
-        setUser({
-          id: response.id,
-          email: response.email,
-          name: response.name,
-          role: 'user',
-        });
-      } catch (error) {
-        console.error('[auth] Register failed', error);
-        throw error;
-      }
+  const login = useCallback(
+    async (email: string, password: string) => {
+      const r = await authAPI.login(email, password);
+      return apply(r.data.user, r.data.token);
     },
-    [],
+    [apply]
   );
 
-  /**
-   * 로그아웃
-   */
-  const logout = useCallback((): void => {
-    localStorage.removeItem('auth_token');
-    localStorage.removeItem('user');
+  const register = useCallback(
+    async (email: string, password: string, name: string) => {
+      const r = await authAPI.register(email, password, name);
+      return apply(r.data.user, r.data.token);
+    },
+    [apply]
+  );
+
+  const logout = useCallback(() => {
+    clearAuthStorage();
     setUser(null);
+    setToken(null);
   }, []);
 
-  /**
-   * 마운트 시 인증 상태 복구
-   */
-  useEffect(() => {
-    checkAuth();
-  }, [checkAuth]);
-
-  const isAuthenticated = user !== null;
-
-  const value = useMemo(
-    () => ({
-      user,
-      isLoading,
-      isAuthenticated,
-      login,
-      register,
-      logout,
-      checkAuth,
-    }),
-    [user, isLoading, isAuthenticated, login, register, logout, checkAuth],
+  const value = useMemo<AuthContextType>(
+    () => ({ user, token, isLoading, isAuthenticated: !!token && !!user, login, register, logout }),
+    [user, token, isLoading, login, register, logout]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
-}
+};
 
-/**
- * 인증 컨텍스트 훅
- */
-export function useAuth(): AuthContextType {
-  const context = useContext(AuthContext);
-  if (!context) {
-    throw new Error('useAuth must be used within AuthProvider');
-  }
-  return context;
-}
+export const useAuth = (): AuthContextType => {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error('useAuth must be used within an AuthProvider');
+  return ctx;
+};

@@ -1,177 +1,82 @@
-import { Router, Request, Response } from 'express';
-import { authMiddleware, getUser } from '../middleware/auth.js';
-import { asyncHandler, ValidationError, NotFoundError } from '../middleware/errorHandler.js';
-import { query as dbQuery, transaction } from '../db.js';
-import { createPaymentIntent, createStripeWebhookRouter, STRIPE_WEBHOOK_PATH } from '../payments/stripe.js';
-import { isPositiveInteger } from '../utils/validation.js';
-import { Order, Payment, WebhookEvent } from '../types.js';
+/**
+ * 결제 세션 생성 도우미와 /api/payment 라우트.
+ * 결제 웹훅(/api/webhooks/stripe)은 server.ts 에서 JSON 파서보다 먼저 등록합니다.
+ */
+import { Router, Request } from 'express';
+import { createPaymentIntent, isTestPaymentMode } from '../payments/stripe.js';
+import { authenticate, getUserId, isAdmin } from '../middleware/auth.js';
+import { asyncHandler } from '../middleware/validateRequest.js';
+import { getOrderById, setPaymentId } from '../services/orderService.js';
+import { ConflictError, PaymentError } from '../utils/errors.js';
+import { parseId } from '../utils/validation.js';
+import { logger } from '../utils/logger.js';
+import { OrderWithItems } from '../types/index.js';
+
+export interface PaymentSession {
+  payment_url: string;
+  client_secret: string | null;
+  test_mode: boolean;
+  expires_at: string | null;
+}
+
+/** 결제 후 돌아올 주소. PUBLIC_URL 이 있으면 그것을, 없으면 요청 호스트를 사용합니다. */
+function returnUrlFor(req: Request, orderId: number): string {
+  const base = (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  return `${base}/orders/${orderId}?from=payment`;
+}
+
+/**
+ * 주문에 대한 결제를 시작(또는 이어서 진행)합니다.
+ * 같은 주문은 멱등키 order-<id>-<주문키> 로 같은 결제(PaymentIntent)를 돌려받습니다.
+ */
+export async function createPaymentSession(req: Request, order: OrderWithItems): Promise<PaymentSession> {
+  let payment;
+  try {
+    payment = await createPaymentIntent({
+      amount: order.total_cents,
+      currency: 'krw',
+      orderId: order.id.toString(),
+      // 주문 id 만 쓰면 DB 를 초기화했을 때 결제사에 남은 예전 결제와 충돌하므로 주문 고유키를 함께 씁니다.
+      idempotencyKey: `order-${order.id}-${order.idempotency_key}`,
+    });
+  } catch (error) {
+    logger.error('Failed to create payment intent', { orderId: order.id, error });
+    throw new PaymentError('결제를 시작하지 못했습니다. 잠시 후 다시 시도해 주세요.');
+  }
+  await setPaymentId(order.id, payment.id);
+
+  // 모의 결제(데모) 모드: 모의 결제 페이지로 이동
+  let paymentUrl = '';
+  if (isTestPaymentMode()) {
+    const mockHost = process.env.STRIPE_MOCK_HOST || 'localhost';
+    const mockPort = process.env.STRIPE_MOCK_PORT || '3001';
+    const returnUrl = returnUrlFor(req, order.id);
+    paymentUrl = `http://${mockHost}:${mockPort}/pay?order_id=${order.id}&amount_cents=${order.total_cents}&currency=krw&return_url=${encodeURIComponent(returnUrl)}`;
+  }
+
+  return {
+    payment_url: paymentUrl,
+    client_secret: payment.clientSecret,
+    test_mode: payment.testMode,
+    expires_at: order.expires_at,
+  };
+}
 
 const router = Router();
 
-/**
- * POST /api/payment/checkout
- * 주문에 대한 결제 의도를 생성합니다.
- */
+/** POST /api/payment/orders/:id — 결제대기 주문의 결제를 다시 진행(결제창을 닫았을 때 등) */
 router.post(
-  '/checkout',
-  authMiddleware,
-  asyncHandler(async (req: Request, res: Response) => {
-    const user = getUser(req);
-    const { order_id } = req.body;
-
-    if (!isPositiveInteger(order_id)) {
-      throw new ValidationError('order_id must be a positive integer');
+  '/orders/:id',
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const order = await getOrderById(parseId(req.params.id), getUserId(req), isAdmin(req));
+    if (order.user_id !== getUserId(req)) throw new ConflictError('본인 주문만 결제할 수 있습니다.');
+    if (order.status !== 'pending') throw new ConflictError('결제 대기 중인 주문이 아닙니다.', 'INVALID_ORDER_STATE');
+    if (order.expires_at && new Date(order.expires_at).getTime() < Date.now()) {
+      throw new ConflictError('결제 가능 시간이 지났습니다. 다시 주문해 주세요.', 'ORDER_EXPIRED');
     }
-
-    // 주문 조회
-    const orderResult = await dbQuery<Order>(
-      'SELECT * FROM orders WHERE id = $1 AND user_id = $2',
-      [order_id, user.id],
-    );
-
-    if (orderResult.rows.length === 0) {
-      throw new NotFoundError('Order not found');
-    }
-
-    const order = orderResult.rows[0];
-
-    if (order.status !== 'pending') {
-      throw new ValidationError(`Order status is ${order.status}, cannot initiate payment`);
-    }
-
-    // 결제 의도 생성
-    const payment = await createPaymentIntent({
-      amount: order.total_amount,
-      currency: 'krw',
-      orderId: order.id,
-      idempotencyKey: `order-${order.id}`,
-    });
-
-    // 결제 기록 저장
-    const paymentResult = await dbQuery<Payment>(
-      `INSERT INTO payments (payment_id, order_id, amount, currency, status)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (payment_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP
-       RETURNING *`,
-      [payment.id, order.id, order.total_amount, 'KRW', 'pending'],
-    );
-
-    res.json({
-      payment_id: payment.id,
-      order_id: order.id,
-      amount: order.total_amount,
-      currency: 'KRW',
-      status: 'pending',
-      client_secret: payment.clientSecret,
-      test_mode: payment.testMode,
-    });
-  }),
+    res.json({ order_id: order.id, total_cents: order.total_cents, ...(await createPaymentSession(req, order)) });
+  })
 );
 
-/**
- * 웹훅 핸들러: 결제 완료 처리
- */
-async function onPaymentSucceeded(event: {
-  eventId: string;
-  orderId: string;
-  paymentIntentId: string;
-  amount: number;
-  currency: string;
-}): Promise<void> {
-  await transaction(async (client) => {
-    // 이벤트 중복 확인
-    const eventCheckResult = await client.query(
-      'SELECT id FROM webhook_events WHERE event_id = $1',
-      [event.eventId],
-    );
-
-    if (eventCheckResult.rows.length > 0) {
-      // 이미 처리된 이벤트
-      return;
-    }
-
-    // 주문 조회
-    const orderResult = await client.query<Order>(
-      'SELECT * FROM orders WHERE id = $1 FOR UPDATE',
-      [event.orderId],
-    );
-
-    if (orderResult.rows.length === 0) {
-      throw new Error(`Order ${event.orderId} not found`);
-    }
-
-    const order = orderResult.rows[0];
-
-    // 금액 검증
-    if (order.total_amount !== event.amount) {
-      throw new Error(
-        `Amount mismatch: order ${order.total_amount}, payment ${event.amount}`,
-      );
-    }
-
-    // 주문 상태를 'paid'로 업데이트
-    await client.query(
-      'UPDATE orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
-      ['paid', order.id],
-    );
-
-    // 결제 상태 업데이트
-    await client.query(
-      'UPDATE payments SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE payment_id = $2',
-      ['completed', event.paymentIntentId],
-    );
-
-    // 웹훅 이벤트 기록 (중복 방지)
-    await client.query(
-      'INSERT INTO webhook_events (event_id, payment_id, status) VALUES ($1, $2, $3)',
-      [event.eventId, event.paymentIntentId, 'completed'],
-    );
-  });
-}
-
-/**
- * 웹훅 핸들러: 결제 실패 처리
- */
-async function onPaymentFailed(event: {
-  eventId: string;
-  orderId: string;
-  paymentIntentId: string;
-  amount: number;
-  currency: string;
-}): Promise<void> {
-  await transaction(async (client) => {
-    // 이벤트 중복 확인
-    const eventCheckResult = await client.query(
-      'SELECT id FROM webhook_events WHERE event_id = $1',
-      [event.eventId],
-    );
-
-    if (eventCheckResult.rows.length > 0) {
-      // 이미 처리된 이벤트
-      return;
-    }
-
-    // 결제 상태 업데이트
-    await client.query(
-      'UPDATE payments SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE payment_id = $2',
-      ['failed', event.paymentIntentId],
-    );
-
-    // 웹훅 이벤트 기록
-    await client.query(
-      'INSERT INTO webhook_events (event_id, payment_id, status) VALUES ($1, $2, $3)',
-      [event.eventId, event.paymentIntentId, 'failed'],
-    );
-  });
-}
-
-/**
- * Stripe 웹훅 라우터 등록
- * 이 라우터는 express.json() 보다 먼저 등록되어야 합니다.
- */
-const webhookRouter = createStripeWebhookRouter({
-  onPaymentSucceeded,
-  onPaymentFailed,
-});
-
-export { router as paymentRouter, webhookRouter, STRIPE_WEBHOOK_PATH };
+export default router;

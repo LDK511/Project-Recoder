@@ -1,0 +1,98 @@
+@import 'pretendard/dist/web/variable/pretendardvariable-dynamic-subset.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    font-feature-settings: 'tnum' 0;
+  }
+  body {
+    @apply bg-white font-sans text-ink antialiased;
+    word-break: keep-all;
+    line-height: 1.55;
+  }
+  :focus-visible {
+    outline: 2px solid #2e5b4f;
+    outline-offset: 2px;
+  }
+  input[type='number']::-webkit-inner-spin-button,
+  input[type='number']::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type='number'] {
+    -moz-appearance: textfield;
+  }
+}
+
+@layer components {
+  .shell {
+    @apply mx-auto w-full max-w-shell px-4 sm:px-6;
+  }
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2.5 text-[15px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-felt text-white hover:bg-felt-dark;
+  }
+  .btn-dark {
+    @apply btn bg-ink text-white hover:bg-black;
+  }
+  .btn-outline {
+    @apply btn border border-line bg-white text-ink hover:border-ink;
+  }
+  .btn-ghost {
+    @apply btn text-ink-soft hover:bg-well;
+  }
+  .btn-danger {
+    @apply btn border border-sale/30 bg-white text-sale hover:bg-sale/5;
+  }
+  .btn-lg {
+    @apply px-5 py-3.5 text-base;
+  }
+  .btn-sm {
+    @apply px-3 py-1.5 text-sm;
+  }
+  .field-label {
+    @apply mb-1.5 block text-sm font-semibold text-ink;
+  }
+  .field-label .opt {
+    @apply ml-1 font-normal text-ink-mute;
+  }
+  .field-label .req {
+    @apply ml-0.5 text-sale;
+  }
+  .input {
+    @apply block w-full rounded-md border border-line bg-white px-3.5 py-2.5 text-[15px] text-ink placeholder:text-ink-mute/70 focus:border-felt focus:outline-none focus:ring-2 focus:ring-felt/15 disabled:bg-well;
+  }
+  .input-error {
+    @apply border-sale focus:border-sale focus:ring-sale/15;
+  }
+  .field-error {
+    @apply mt-1.5 text-sm text-sale;
+  }
+  .field-hint {
+    @apply mt-1.5 text-[13px] text-ink-mute;
+  }
+  .panel {
+    @apply rounded-lg border border-line bg-white;
+  }
+  .page-title {
+    @apply text-2xl font-bold tracking-tight sm:text-[28px];
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

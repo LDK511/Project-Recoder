@@ -1,228 +1,194 @@
-import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { apiClient } from '../api/client';
-import { useAuth } from '../context/AuthContext';
-import { CartResponse, CartItem } from '../types';
-import '../styles/Cart.css';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { getErrorMessage } from '../api/client';
+import { useCartContext } from '../context/CartContext';
+import CartSummary from '../components/CartSummary';
+import LoadingSpinner from '../components/LoadingSpinner';
+import ErrorAlert from '../components/ErrorAlert';
+import { EmptyState, ProductImage, QuantityStepper } from '../components/ui';
+import { Icon } from '../components/Icon';
+import { formatPrice } from '../utils/formatters';
+import type { CartItemWithProduct } from '../types';
 
-export function CartPage() {
+const isPurchasable = (i: CartItemWithProduct) => i.is_active && i.stock > 0 && i.quantity <= i.stock;
+
+const CartPage: React.FC = () => {
   const navigate = useNavigate();
-  const { user } = useAuth();
-  const [cart, setCart] = useState<CartResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const { items, isLoading, updateItem, removeItem, refresh } = useCartContext();
   const [error, setError] = useState<string | null>(null);
-  const [updating, setUpdating] = useState<number | null>(null);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [initialised, setInitialised] = useState(false);
 
   useEffect(() => {
-    if (!user) {
-      navigate('/login');
-      return;
+    refresh().catch((e) => setError(getErrorMessage(e)));
+  }, [refresh]);
+
+  // 처음 들어오면 구매 가능한 상품을 모두 선택
+  useEffect(() => {
+    if (!initialised && items.length) {
+      setSelected(new Set(items.filter(isPurchasable).map((i) => i.id)));
+      setInitialised(true);
     }
+  }, [items, initialised]);
 
-    fetchCart();
-  }, [user, navigate]);
+  const purchasable = items.filter(isPurchasable);
+  const chosen = items.filter((i) => selected.has(i.id) && isPurchasable(i));
+  const subtotal = chosen.reduce((s, i) => s + i.price_cents * i.quantity, 0);
+  const compareTotal = chosen.reduce((s, i) => s + (i.compare_at_price_cents ?? i.price_cents) * i.quantity, 0);
+  const allChecked = purchasable.length > 0 && purchasable.every((i) => selected.has(i.id));
 
-  const fetchCart = async () => {
+  const toggle = (id: number) =>
+    setSelected((prev) => {
+      const n = new Set(prev);
+      n.has(id) ? n.delete(id) : n.add(id);
+      return n;
+    });
+
+  const run = async (id: number, fn: () => Promise<void>) => {
+    setBusyId(id);
+    setError(null);
     try {
-      setLoading(true);
-      setError(null);
-      const response = await apiClient.get('/api/cart');
-      setCart(response.data);
-    } catch (err: any) {
-      setError(err.response?.data?.error || '장바구니를 불러올 수 없습니다');
+      await fn();
+    } catch (e) {
+      setError(getErrorMessage(e));
     } finally {
-      setLoading(false);
+      setBusyId(null);
     }
   };
 
-  const handleRemoveItem = async (productId: number) => {
-    try {
-      setUpdating(productId);
-      setError(null);
-      const response = await apiClient.delete(`/api/cart/remove/${productId}`);
-      setCart(response.data);
-    } catch (err: any) {
-      setError(err.response?.data?.error || '상품 제거에 실패했습니다');
-    } finally {
-      setUpdating(null);
-    }
+  const removeSelected = async () => {
+    const ids = items.filter((i) => selected.has(i.id) || !isPurchasable(i)).map((i) => i.id);
+    for (const id of ids) await run(id, () => removeItem(id));
   };
 
-  const handleUpdateQuantity = async (productId: number, newQuantity: number) => {
-    if (newQuantity < 1) {
-      await handleRemoveItem(productId);
-      return;
-    }
+  const checkoutQuery = useMemo(() => chosen.map((i) => i.id).join(','), [chosen]);
 
-    const item = cart?.items.find((i) => i.product_id === productId);
-    if (!item || !item.product) return;
+  if (isLoading && items.length === 0) return <LoadingSpinner />;
 
-    if (newQuantity > item.product.stock) {
-      setError(`재고 부족. 최대 ${item.product.stock}개까지 구매 가능합니다`);
-      return;
-    }
-
-    try {
-      setUpdating(productId);
-      setError(null);
-      const response = await apiClient.post('/api/cart/add', {
-        product_id: productId,
-        quantity: newQuantity - item.quantity,
-      });
-      setCart(response.data);
-    } catch (err: any) {
-      setError(err.response?.data?.error || '수량 업데이트에 실패했습니다');
-    } finally {
-      setUpdating(null);
-    }
-  };
-
-  const handleClearCart = async () => {
-    if (!window.confirm('장바구니를 비우시겠습니까?')) return;
-
-    try {
-      setUpdating(-1);
-      setError(null);
-      const response = await apiClient.post('/api/cart/clear');
-      setCart(response.data);
-    } catch (err: any) {
-      setError(err.response?.data?.error || '장바구니 비우기에 실패했습니다');
-    } finally {
-      setUpdating(null);
-    }
-  };
-
-  const handleCheckout = () => {
-    if (!cart || cart.items.length === 0) {
-      setError('장바구니가 비어있습니다');
-      return;
-    }
-    navigate('/checkout');
-  };
-
-  if (loading) {
+  if (items.length === 0) {
     return (
-      <div className="cart-container">
-        <div className="loading">로딩 중...</div>
+      <div className="shell pt-8">
+        <h1 className="page-title">장바구니</h1>
+        <EmptyState
+          icon="bag"
+          title="장바구니가 비어 있어요"
+          description="마음에 드는 상품을 담아 두면 여기서 한 번에 주문할 수 있어요."
+          action={
+            <Link to="/" className="btn-primary">
+              상품 둘러보기
+            </Link>
+          }
+        />
       </div>
     );
   }
 
   return (
-    <div className="cart-container">
-      <h1>장바구니</h1>
+    <div className="shell pt-8">
+      <h1 className="page-title">장바구니</h1>
+      {error && <ErrorAlert message={error} onDismiss={() => setError(null)} className="mt-4" />}
 
-      {error && <div className="error-message">{error}</div>}
+      <div className="mt-6 grid gap-8 lg:grid-cols-[minmax(0,1fr)_360px]">
+        <section aria-label="담은 상품">
+          <div className="flex items-center justify-between border-b-2 border-ink pb-3">
+            <label className="flex cursor-pointer items-center gap-2.5 text-[15px] font-semibold">
+              <input
+                type="checkbox"
+                className="h-[18px] w-[18px] accent-felt"
+                checked={allChecked}
+                onChange={() => setSelected(allChecked ? new Set() : new Set(purchasable.map((i) => i.id)))}
+              />
+              전체 선택 <span className="num font-normal text-ink-mute">({chosen.length}/{purchasable.length})</span>
+            </label>
+            <button className="text-sm text-ink-mute hover:text-ink" onClick={removeSelected} disabled={busyId !== null}>
+              선택 삭제
+            </button>
+          </div>
 
-      {!cart || cart.items.length === 0 ? (
-        <div className="empty-cart">
-          <p>장바구니가 비어있습니다</p>
-          <button onClick={() => navigate('/products')} className="btn btn-primary">
-            상품 보러 가기
-          </button>
-        </div>
-      ) : (
-        <>
-          <div className="cart-items">
-            <div className="cart-header">
-              <div className="col-product">상품</div>
-              <div className="col-price">가격</div>
-              <div className="col-quantity">수량</div>
-              <div className="col-total">합계</div>
-              <div className="col-action">작업</div>
-            </div>
-
-            {cart.items.map((item: CartItem) => {
-              const product = item.product;
-              if (!product) return null;
-
-              const itemTotal = product.price * item.quantity;
-
+          <ul className="divide-y divide-line">
+            {items.map((item) => {
+              const ok = isPurchasable(item);
+              const problem = !item.is_active
+                ? '판매가 종료된 상품입니다.'
+                : item.stock <= 0
+                  ? '품절된 상품입니다.'
+                  : item.quantity > item.stock
+                    ? `재고가 ${item.stock}개 남았어요. 수량을 줄여 주세요.`
+                    : null;
               return (
-                <div key={item.id} className="cart-item">
-                  <div className="col-product">
-                    <img
-                      src={product.image_url || `https://placehold.co/80x80?text=${encodeURIComponent(product.name)}`}
-                      alt={product.name}
-                      className="item-image"
-                    />
-                    <div className="item-info">
-                      <h3
-                        className="item-name"
-                        onClick={() => navigate(`/products/${product.id}`)}
-                        style={{ cursor: 'pointer', color: '#0066cc' }}
+                <li key={item.id} className={`flex gap-3 py-5 sm:gap-4 ${busyId === item.id ? 'opacity-60' : ''}`}>
+                  <input
+                    type="checkbox"
+                    className="mt-1 h-[18px] w-[18px] shrink-0 accent-felt"
+                    checked={selected.has(item.id) && ok}
+                    disabled={!ok}
+                    onChange={() => toggle(item.id)}
+                    aria-label={`${item.product_name} 선택`}
+                  />
+                  <Link to={`/products/${item.product_id}`} className="shrink-0">
+                    <ProductImage src={item.image_url} alt={item.product_name} className={`h-20 w-20 sm:h-24 sm:w-24 ${ok ? '' : 'opacity-50'}`} />
+                  </Link>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-start justify-between gap-3">
+                      <Link to={`/products/${item.product_id}`} className="line-clamp-2 text-[15px] hover:underline">
+                        {item.product_name}
+                      </Link>
+                      <button
+                        onClick={() => run(item.id, () => removeItem(item.id))}
+                        className="-mr-1 -mt-1 shrink-0 p-1 text-ink-mute hover:text-ink"
+                        aria-label={`${item.product_name} 삭제`}
                       >
-                        {product.name}
-                      </h3>
+                        <Icon name="x" className="h-[18px] w-[18px]" />
+                      </button>
+                    </div>
+                    {problem && <p className="mt-1 text-sm font-semibold text-sale">{problem}</p>}
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                      {item.is_active && item.stock > 0 ? (
+                        <QuantityStepper
+                          size="sm"
+                          value={Math.min(item.quantity, Math.max(item.stock, 1))}
+                          max={Math.min(item.stock, 99)}
+                          disabled={busyId === item.id}
+                          onChange={(q) => run(item.id, () => updateItem(item.id, q))}
+                          label={`${item.product_name} 수량`}
+                        />
+                      ) : (
+                        <span />
+                      )}
+                      <p className="num text-right">
+                        {item.compare_at_price_cents && item.compare_at_price_cents > item.price_cents && (
+                          <span className="mr-2 text-sm text-ink-mute line-through">
+                            {formatPrice(item.compare_at_price_cents * item.quantity)}
+                          </span>
+                        )}
+                        <span className="text-[17px] font-bold">{formatPrice(item.price_cents * item.quantity)}</span>
+                      </p>
                     </div>
                   </div>
-
-                  <div className="col-price">{product.price.toLocaleString('ko-KR')}원</div>
-
-                  <div className="col-quantity">
-                    <input
-                      type="number"
-                      min="1"
-                      max={product.stock}
-                      value={item.quantity}
-                      onChange={(e) => handleUpdateQuantity(product.id, parseInt(e.target.value, 10))}
-                      disabled={updating === product.id}
-                      className="quantity-input"
-                    />
-                  </div>
-
-                  <div className="col-total">{itemTotal.toLocaleString('ko-KR')}원</div>
-
-                  <div className="col-action">
-                    <button
-                      onClick={() => handleRemoveItem(product.id)}
-                      disabled={updating === product.id}
-                      className="btn btn-danger btn-small"
-                    >
-                      {updating === product.id ? '처리 중...' : '제거'}
-                    </button>
-                  </div>
-                </div>
+                </li>
               );
             })}
-          </div>
+          </ul>
+        </section>
 
-          <div className="cart-summary">
-            <div className="summary-row">
-              <span className="summary-label">상품 수:</span>
-              <span className="summary-value">{cart.items.length}개</span>
-            </div>
-            <div className="summary-row">
-              <span className="summary-label">총액:</span>
-              <span className="summary-value total">{cart.total_amount.toLocaleString('ko-KR')}원</span>
-            </div>
-          </div>
-
-          <div className="cart-actions">
+        <aside className="lg:sticky lg:top-28 lg:self-start">
+          <CartSummary subtotal_cents={subtotal} compare_total_cents={compareTotal}>
             <button
-              onClick={() => navigate('/products')}
-              className="btn btn-secondary"
+              className="btn-primary btn-lg w-full"
+              disabled={chosen.length === 0}
+              onClick={() => navigate(`/checkout?items=${checkoutQuery}`)}
             >
-              계속 쇼핑하기
+              {chosen.length === 0 ? '주문할 상품을 선택해 주세요' : `${chosen.length}개 상품 주문하기`}
             </button>
-            <button
-              onClick={handleClearCart}
-              disabled={updating === -1}
-              className="btn btn-outline"
-            >
-              {updating === -1 ? '처리 중...' : '장바구니 비우기'}
-            </button>
-            <button
-              onClick={handleCheckout}
-              className="btn btn-primary"
-            >
-              결제하기
-            </button>
-          </div>
-        </>
-      )}
+            <Link to="/" className="mt-3 block text-center text-sm text-ink-mute hover:text-ink">
+              쇼핑 계속하기
+            </Link>
+          </CartSummary>
+        </aside>
+      </div>
     </div>
   );
-}
+};
 
 export default CartPage;
